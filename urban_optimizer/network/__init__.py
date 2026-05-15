@@ -1,6 +1,16 @@
 """Construction du réseau routier (OSM + ROUTE500)."""
 
-# Les fonctions seront importées ici au fur et à mesure du développement
-# from .loader import build_network
-# from .enricher import add_capacity, add_bpr_params
-# from .merger import merge_networks
+from .builder import build_network
+from .merger import build_unified_network
+from .osm_loader import load_osm
+from .route500_loader import filter_route500_outside_urban, load_route500
+from .urban_network import UrbanNetwork
+
+__all__ = [
+    "build_network",
+    "build_unified_network",
+    "load_osm",
+    "load_route500",
+    "filter_route500_outside_urban",
+    "UrbanNetwork",
+]
