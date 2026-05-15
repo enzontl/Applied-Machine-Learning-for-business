@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urban_optimizer"
+version = "0.1.0"
+description = "Modèle générique d'optimisation des réseaux routiers urbains par affectation dynamique de flux OD"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Enzo Natali" }]
+license = { text = "MIT" }
+
+dependencies = [
+    # --- Données géo ---
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "rtree>=1.1",
+
+    # --- Réseau routier ---
+    "osmnx>=1.9",
+    "networkx>=3.2",
+    "igraph>=0.11",        # plus rapide que networkx pour Frank-Wolfe
+
+    # --- Calcul scientifique ---
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "numba>=0.59",         # JIT sur les boucles critiques
+
+    # --- Visualisation ---
+    "folium>=0.15",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "plotly>=5.18",
+
+    # --- Application ---
+    "streamlit>=1.30",     # dashboard
+    "tqdm>=4.66",          # barres de progression
+
+    # --- Données INSEE / API ---
+    "requests>=2.31",
+    "pyarrow>=15.0",       # parquet
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.2",
+    "black>=24.1",
+    "jupyter>=1.0",
+    "ipykernel>=6.29",
+    "ipywidgets>=8.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["urban_optimizer*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

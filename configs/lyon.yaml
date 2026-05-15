@@ -1,0 +1,31 @@
+city:
+  name: "Lyon, France"
+  insee_code_dept: "69"
+  bbox_buffer_km: 10        # zone tampon autour de la métropole pour les liaisons sortantes
+
+network:
+  source: "osmnx"
+  osm_network_type: "drive"
+  include_route500: true
+  simplify: true
+
+zoning:
+  method: "iris"            # alternatives: "h3", "grid"
+  h3_resolution: 8          # ignoré si method != "h3"
+
+demand:
+  scenario: "weekday"
+  hour: 8
+  gravity_beta: 0.1
+  scale_factor: 1.0         # multiplicateur global de la demande
+
+assignment:
+  method: "user_equilibrium"   # alternatives: "aon", "system_optimum"
+  max_iter: 100
+  tolerance: 1e-4
+
+optimization:
+  budget_euros: 10_000_000
+  candidates:
+    - "capacity_boost_15pct"
+    - "speed_increase_10kmh"

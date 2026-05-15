@@ -1,1 +1,72 @@
-ROUTE500_3-0__SHP_LAMB93_FXX_2021-11-03/
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+*.egg-info/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Environnements virtuels ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Données volumineuses ---
+data/raw/*
+data/processed/*
+data/external/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/external/.gitkeep
+
+# Spécifique au projet
+ROUTE500_*/
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.gpkg
+*.parquet
+
+# --- Caches OSMnx ---
+cache/
+.osmnx_cache/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Secrets ---
+.env
+.env.local
+configs/secrets.yaml
+
+# --- Outputs ---
+outputs/
+results/
+*.html
+!notebooks/*.html
