@@ -37,6 +37,7 @@ dependencies = [
 
     # --- Application ---
     "streamlit>=1.30",     # dashboard
+    "streamlit-folium>=0.20",  # carte interactive dans streamlit
     "tqdm>=4.66",          # barres de progression
 
     # --- Données INSEE / API ---
@@ -54,6 +55,7 @@ dev = [
     "ipykernel>=6.29",
     "ipywidgets>=8.1",
 ]
+h3 = ["h3>=3.7"]
 
 [tool.setuptools.packages.find]
 include = ["urban_optimizer*"]
