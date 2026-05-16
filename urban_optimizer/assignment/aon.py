@@ -56,7 +56,7 @@ def assign_aon(
             epaths = graph.get_shortest_paths(
                 source, to=targets, weights=weights_arg, mode="out", output="epath"
             )
-            for epath, (_, trips) in zip(epaths, dests, strict=True):
+            for epath, (_, trips) in zip(epaths, dests):
                 if not epath:
                     continue
                 flows[epath] += trips
