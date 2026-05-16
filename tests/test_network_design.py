@@ -210,3 +210,76 @@ class TestProposeUrbanPlan:
         )
         total_cost = sum(e.cost_eur for e in plan)
         assert total_cost <= 1_000_000
+
+
+# ── BuildingIndex ────────────────────────────────────────────────────────────
+
+class TestBuildingIndex:
+    from shapely.geometry import Polygon
+
+    def _make_index(self, polygons):
+        from urban_optimizer.network.buildings import BuildingIndex
+        return BuildingIndex(polygons)
+
+    def test_segment_through_building_rejected(self):
+        from shapely.geometry import Polygon
+        from urban_optimizer.network.buildings import BuildingIndex
+        # Bâtiment carré centré en (500, 500)
+        building = Polygon([(400, 400), (600, 400), (600, 600), (400, 600)])
+        idx = BuildingIndex([building])
+        # Segment qui traverse le bâtiment de gauche à droite
+        segment = LineString([(0, 500), (1000, 500)])
+        assert idx.crosses(segment) is True
+
+    def test_segment_beside_building_accepted(self):
+        from shapely.geometry import Polygon
+        from urban_optimizer.network.buildings import BuildingIndex
+        building = Polygon([(400, 400), (600, 400), (600, 600), (400, 600)])
+        idx = BuildingIndex([building])
+        # Segment qui passe loin au-dessus du bâtiment
+        segment = LineString([(0, 800), (1000, 800)])
+        assert idx.crosses(segment) is False
+
+    def test_empty_index_never_rejects(self):
+        from urban_optimizer.network.buildings import BuildingIndex
+        idx = BuildingIndex([])
+        segment = LineString([(0, 0), (1000, 1000)])
+        assert idx.crosses(segment) is False
+
+    def test_buffer_catches_near_miss(self):
+        from shapely.geometry import Polygon
+        from urban_optimizer.network.buildings import BuildingIndex, _ROAD_HALF_WIDTH_M
+        # Bâtiment juste à côté du segment (dans le buffer de route)
+        building = Polygon([(100, 3), (200, 3), (200, 8), (100, 8)])
+        idx = BuildingIndex([building])
+        # Segment horizontal à y=0, bâtiment à y=3..8 → dans le buffer (5m)
+        segment = LineString([(0, 0), (300, 0)])
+        assert idx.crosses(segment, buffer_m=_ROAD_HALF_WIDTH_M) is True
+
+    def test_building_filter_removes_blocked_candidate(self):
+        """generate_new_arc_candidates rejette le raccourci si un bâtiment le bloque."""
+        from shapely.geometry import Polygon
+        from urban_optimizer.network.buildings import BuildingIndex
+
+        net = _detour_network()
+        od = _od()
+
+        # Bâtiment géant couvrant toute la diagonale 0→3
+        building = Polygon([(-100, -100), (1100, -100), (1100, 1100), (-100, 1100)])
+        idx = BuildingIndex([building])
+
+        cands_with = generate_new_arc_candidates(
+            net, od,
+            min_length_m=100, max_length_m=5000,
+            min_detour_ratio=1.30,
+            building_index=idx,
+        )
+        cands_without = generate_new_arc_candidates(
+            net, od,
+            min_length_m=100, max_length_m=5000,
+            min_detour_ratio=1.30,
+        )
+        # Avec le bâtiment tout couvrant, tous les candidats doivent être éliminés
+        assert len(cands_with) == 0
+        # Sans filtre, des candidats existent
+        assert len(cands_without) > 0

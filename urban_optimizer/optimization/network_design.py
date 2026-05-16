@@ -33,6 +33,7 @@ from urban_optimizer.assignment.frank_wolfe import (
 from urban_optimizer.assignment.result import AssignmentResult
 from urban_optimizer.config import BPR_ALPHA, BPR_BETA
 from urban_optimizer.demand.od_matrix import ODMatrix
+from urban_optimizer.network.buildings import BuildingIndex
 from urban_optimizer.network.urban_network import UrbanNetwork
 from urban_optimizer.utils.logging import get_logger
 
@@ -138,6 +139,7 @@ def generate_new_arc_candidates(
     max_length_m: float = 4_000.0,
     min_detour_ratio: float = 1.30,
     max_candidates: int = 80,
+    building_index: BuildingIndex | None = None,
 ) -> list[NewArcProposal]:
     """Cherche les paires de nœuds (u, v) qui justifieraient un nouvel arc.
 
@@ -146,6 +148,7 @@ def generate_new_arc_candidates(
 
     - distance euclidienne dans la fenêtre
     - détour graphique actuel ≥ ``min_detour_ratio``
+    - tracé rectiligne ne traversant aucun bâtiment (si *building_index* fourni)
 
     Score de proxy = (détour gagné) × max(1, demande directe OD).
     Top ``max_candidates`` retournés.
@@ -164,6 +167,7 @@ def generate_new_arc_candidates(
     od_lookup = _zone_demand_lookup(od)
 
     proposals: list[tuple[float, NewArcProposal]] = []
+    n_building_rejected = 0
     n = len(demand_nodes)
     for i in range(n):
         for j in range(i + 1, n):
@@ -179,6 +183,13 @@ def generate_new_arc_candidates(
             detour = path_len / euclid
             if detour < min_detour_ratio:
                 continue
+
+            # Filtre bâtiments : on rejette si le tracé rectiligne traverse un bâtiment
+            if building_index is not None:
+                segment = LineString([(ux, uy), (vx, vy)])
+                if building_index.crosses(segment):
+                    n_building_rejected += 1
+                    continue
 
             u_node = demand_nodes[i]
             v_node = demand_nodes[j]
@@ -198,6 +209,8 @@ def generate_new_arc_candidates(
                 ),
             ))
 
+    if building_index is not None:
+        logger.info(f"NDP — {n_building_rejected} candidats rejetés (traversent des bâtiments)")
     proposals.sort(key=lambda x: -x[0])
     top = [p for _, p in proposals[:max_candidates]]
     logger.info(f"NDP — {len(top)} candidats retenus (sur {len(proposals)} générés)")
@@ -327,8 +340,14 @@ def propose_urban_plan(
     max_fw_evals: int = 15,
     fw_max_iter: int = 60,
     fw_tol: float = 1e-3,
+    building_index: BuildingIndex | None = None,
 ) -> tuple[list[NewArcEvaluation], CityScore]:
     """Pipeline complet de proposition de nouvelles routes.
+
+    Args:
+        building_index: index spatial des bâtiments OSM. Si fourni, les candidats
+            dont le tracé rectiligne traverse un bâtiment sont rejetés avant
+            toute évaluation Frank-Wolfe.
 
     Returns:
         ``(plan, baseline_score)`` où ``plan`` est la liste ordonnée des
@@ -338,7 +357,7 @@ def propose_urban_plan(
     logger.info(f"Score baseline ({profile.name}) : {baseline_score.composite_score:,.0f} €/an")
 
     raw = generate_new_arc_candidates(
-        network, od, max_candidates=max_proposals,
+        network, od, max_candidates=max_proposals, building_index=building_index,
     )
     if not raw:
         logger.warning("Aucun candidat de construction trouvé.")

@@ -30,7 +30,7 @@ from urban_optimizer.assignment import (
 from urban_optimizer.config import CRS_WGS84
 from urban_optimizer.demand import generate_od_matrix
 from urban_optimizer.diagnosis import diagnose
-from urban_optimizer.network import build_network
+from urban_optimizer.network import build_network, load_buildings
 from urban_optimizer.optimization import (
     ALL_PROFILES,
     PROFILE_BY_NAME,
@@ -50,8 +50,8 @@ st.set_page_config(page_title="Urban Optimizer", layout="wide", page_icon="🛣�
 # ────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
-def cached_network(city: str, include_route500: bool):
-    return build_network(city, include_route500=include_route500)
+def cached_buildings(city: str):
+    return load_buildings(city)
 
 
 @st.cache_data(show_spinner=False)
@@ -163,13 +163,15 @@ if run_btn or st.session_state.get("ran_once"):
     st.markdown(f"### Plan urbain proposé — profil {profile.label}")
     with st.spinner(f"Génération du plan urbain (jusqu'à {max_fw_evals} arcs évalués)…"):
         t = time.time()
+        building_index = cached_buildings(city)   # ← ajouter cette ligne
         plan, _ = propose_urban_plan(
             net, od, profile, ue,
             budget_eur=budget_eur,
             max_proposals=max_candidates,
             max_fw_evals=max_fw_evals,
             fw_max_iter=60, fw_tol=1e-3,
-        )
+            building_index=building_index,         # ← ajouter ce paramètre
+)
         t_plan = time.time() - t
     st.caption(f"Plan généré en {t_plan:.1f}s")
 
