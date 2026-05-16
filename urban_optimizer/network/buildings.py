@@ -16,9 +16,10 @@ from urban_optimizer.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Demi-largeur de route utilisée pour le test d'intersection (mètres).
-# Une route tertiaire fait ~3.5 m/voie ; on prend 5 m de marge.
-_ROAD_HALF_WIDTH_M = 5.0
+# Corridor autour du segment pour le test d'intersection (mètres).
+# On utilise 15 m pour rejeter les routes qui frôlent ou traversent les bâtiments,
+# même si l'axe central ne touche que le bord de l'emprise.
+_ROAD_HALF_WIDTH_M = 15.0
 
 
 class BuildingIndex:

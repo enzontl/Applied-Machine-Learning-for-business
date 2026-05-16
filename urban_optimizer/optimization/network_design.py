@@ -338,8 +338,8 @@ def propose_urban_plan(
     budget_eur: float = 50_000_000.0,
     max_proposals: int = 60,
     max_fw_evals: int = 15,
-    fw_max_iter: int = 60,
-    fw_tol: float = 1e-3,
+    fw_max_iter: int = 25,
+    fw_tol: float = 5e-3,
     building_index: BuildingIndex | None = None,
 ) -> tuple[list[NewArcEvaluation], CityScore]:
     """Pipeline complet de proposition de nouvelles routes.

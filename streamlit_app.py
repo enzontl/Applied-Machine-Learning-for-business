@@ -50,6 +50,11 @@ st.set_page_config(page_title="Urban Optimizer", layout="wide", page_icon="🛣�
 # ────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
+def cached_network(city: str, include_route500: bool):
+    return build_network(city, include_route500=include_route500)
+
+
+@st.cache_resource(show_spinner=False)
 def cached_buildings(city: str):
     return load_buildings(city)
 
@@ -99,13 +104,17 @@ n_cells = st.sidebar.slider("Cellules de zonage", 4, 20, 10)
 scale_factor = st.sidebar.slider("Échelle de demande", 0.1, 2.0, 0.3, step=0.1)
 
 st.sidebar.markdown("### Solveur Frank-Wolfe")
-max_iter = st.sidebar.slider("Itérations UE", 30, 300, 100, step=10)
+max_iter = st.sidebar.slider("Itérations UE", 20, 200, 60, step=10)
 
 st.sidebar.markdown("### Plan urbain")
 budget_meur = st.sidebar.slider("Budget construction (M€)", 5, 500, 50, step=5)
 budget_eur = budget_meur * 1_000_000
-max_candidates = st.sidebar.slider("Candidats à explorer", 10, 100, 30)
-max_fw_evals = st.sidebar.slider("Évaluations Frank-Wolfe", 5, 25, 10)
+max_candidates = st.sidebar.slider("Candidats à explorer", 5, 60, 20)
+max_fw_evals = st.sidebar.slider(
+    "Évaluations Frank-Wolfe",
+    3, 15, 8,
+    help="Réduit pour accélérer : chaque évaluation relance un FW complet.",
+)
 include_braess = st.sidebar.checkbox(
     "Aussi suggérer des suppressions (Braess)",
     value=True,
@@ -163,15 +172,15 @@ if run_btn or st.session_state.get("ran_once"):
     st.markdown(f"### Plan urbain proposé — profil {profile.label}")
     with st.spinner(f"Génération du plan urbain (jusqu'à {max_fw_evals} arcs évalués)…"):
         t = time.time()
-        building_index = cached_buildings(city)   # ← ajouter cette ligne
+        building_index = cached_buildings(city)
         plan, _ = propose_urban_plan(
             net, od, profile, ue,
             budget_eur=budget_eur,
             max_proposals=max_candidates,
             max_fw_evals=max_fw_evals,
-            fw_max_iter=60, fw_tol=1e-3,
-            building_index=building_index,         # ← ajouter ce paramètre
-)
+            fw_max_iter=25, fw_tol=5e-3,
+            building_index=building_index,
+        )
         t_plan = time.time() - t
     st.caption(f"Plan généré en {t_plan:.1f}s")
 
