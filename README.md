@@ -61,13 +61,23 @@ top_improvements = rank_improvements(G, od, budget=10_000_000)
 ## Roadmap
 
 - [x] Setup global (env, structure)
-- [ ] Brique 1 : construction du réseau OSM + ROUTE500
-- [ ] Brique 2 : zonage et demande OD via INSEE
-- [ ] Brique 3 : algorithmes d'affectation (AoN → UE → SO)
-- [ ] Brique 4 : diagnostic du réseau
-- [ ] Brique 5 : optimisation et ranking
-- [ ] Démo Lyon
-- [ ] Application multi-villes
+- [x] Brique 1 : construction du réseau OSM + ROUTE500
+- [x] Brique 2 : zonage (grille / IRIS / H3) et demande OD par modèle gravitaire
+- [x] Brique 3 : algorithmes d'affectation (AoN, UE Frank-Wolfe, SO marginal, prix de l'anarchie)
+- [x] Brique 4 : diagnostic du réseau (saturation, VHT, arcs critiques)
+- [x] Brique 5 : ranking marginal sous budget + détection Braess
+- [x] Démo interactive Streamlit (`streamlit run streamlit_app.py`)
+- [ ] Application multi-villes (Lyon, Lille, Paris)
+
+## Démo Streamlit
+
+```bash
+source .venv/bin/activate
+streamlit run streamlit_app.py
+```
+
+Choisis une ville, l'heure, le budget, lance le pipeline → top-3 recommandations
+(amélioration en bleu, retrait Braess en rouge) sur la carte.
 
 ## Sources de données
 
