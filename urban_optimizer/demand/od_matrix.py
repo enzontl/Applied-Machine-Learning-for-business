@@ -43,7 +43,7 @@ class ODMatrix:
     def iter_pairs(self):
         """Itère sur les triplets (zone_o, zone_d, trips) avec trips > 0."""
         nz = np.nonzero(self.matrix)
-        for i, j in zip(*nz, strict=False):
+        for i, j in zip(*nz):
             yield self.zone_ids[i], self.zone_ids[j], float(self.matrix[i, j])
 
     def to_node_pairs(self):
