@@ -50,6 +50,11 @@ st.set_page_config(page_title="Urban Optimizer", layout="wide", page_icon="🛣�
 # ────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
+def cached_network(city: str, include_route500: bool):
+    return build_network(city, include_route500=include_route500)
+
+
+@st.cache_resource(show_spinner=False)
 def cached_buildings(city: str):
     return load_buildings(city)
 
