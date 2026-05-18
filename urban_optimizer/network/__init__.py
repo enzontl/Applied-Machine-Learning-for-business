@@ -1,7 +1,7 @@
 """Construction du réseau routier (OSM + ROUTE500)."""
 
 from .builder import build_network
-from .buildings import BuildingIndex, ObstacleIndex, load_buildings, load_obstacles
+from .buildings import BuildingIndex, ObstacleIndex, load_bridge_triggers, load_buildings, load_obstacles
 from .merger import build_unified_network
 from .osm_loader import load_osm
 from .route500_loader import filter_route500_outside_urban, load_route500
@@ -17,5 +17,6 @@ __all__ = [
     "ObstacleIndex",
     "BuildingIndex",
     "load_obstacles",
+    "load_bridge_triggers",
     "load_buildings",
 ]

@@ -30,7 +30,7 @@ from urban_optimizer.assignment import (
 from urban_optimizer.config import CRS_WGS84
 from urban_optimizer.demand import generate_od_matrix
 from urban_optimizer.diagnosis import diagnose
-from urban_optimizer.network import build_network, load_obstacles
+from urban_optimizer.network import build_network, load_bridge_triggers, load_obstacles
 from urban_optimizer.optimization import (
     ALL_PROFILES,
     PROFILE_BY_NAME,
@@ -57,6 +57,11 @@ def cached_network(city: str, include_route500: bool):
 @st.cache_resource(show_spinner=False)
 def cached_obstacles(city: str):
     return load_obstacles(city)
+
+
+@st.cache_resource(show_spinner=False)
+def cached_bridge_triggers(city: str):
+    return load_bridge_triggers(city)
 
 
 @st.cache_data(show_spinner=False)
@@ -169,13 +174,15 @@ if run_btn or st.session_state.get("ran_once"):
     with st.spinner(f"Génération du plan urbain (jusqu'à {max_fw_evals} arcs évalués)…"):
         t = time.time()
         obstacle_index = cached_obstacles(city)
+        soft_index = cached_bridge_triggers(city)
         plan, _ = propose_urban_plan(
             net, od, profile, ue,
             budget_eur=budget_eur,
             max_proposals=max_candidates,
             max_fw_evals=max_fw_evals,
             fw_max_iter=25, fw_tol=5e-3,
-            building_index=obstacle_index,
+            obstacle_index=obstacle_index,
+            soft_index=soft_index,
         )
         t_plan = time.time() - t
     st.caption(f"Plan généré en {t_plan:.1f}s")
@@ -186,7 +193,8 @@ if run_btn or st.session_state.get("ran_once"):
             p = ev.proposal
             rows.append({
                 "rang": i,
-                "action": "élargissement" if p.is_corridor else "nouvelle route",
+                "action": {"corridor": "élargissement", "upgrade": "mise à niveau",
+                           "new_route": "nouvelle route"}.get(p.proposal_type, p.proposal_type),
                 "type": p.highway,
                 "longueur": f"{p.length_m:.0f} m",
                 "détour avant": f"{p.detour_before:.2f}×",
@@ -297,12 +305,13 @@ if run_btn or st.session_state.get("ran_once"):
         gs = gpd.GeoSeries([_LineString(coords_lambert)], crs=net.crs)
         return gs.to_crs(CRS_WGS84).iloc[0]
 
-    # 🟦 CORRIDORS À ÉLARGIR  🟩 NOUVELLES ROUTES
+    # 🟦 CORRIDORS  🟩 MISES À NIVEAU
     for i, ev in enumerate(plan, start=1):
         p = ev.proposal
-        is_corridor = p.is_corridor
-        color = "#1f6feb" if is_corridor else "#1a9b4b"
-        label = "ÉLARGISSEMENT" if is_corridor else "NOUVELLE ROUTE"
+        _COLORS = {"corridor": "#1f6feb", "upgrade": "#d63384", "new_route": "#1a9b4b"}
+        _LABELS = {"corridor": "ÉLARGISSEMENT", "upgrade": "MISE À NIVEAU", "new_route": "NOUVELLE ROUTE"}
+        color = _COLORS.get(p.proposal_type, "#888888")
+        label = _LABELS.get(p.proposal_type, p.proposal_type)
         raw_coords = p.corridor_xy if len(p.corridor_xy) >= 2 else [p.u_xy, p.v_xy]
         ll = to_wgs(raw_coords)
         map_coords = [(y, x) for x, y in ll.coords]
@@ -353,7 +362,8 @@ if run_btn or st.session_state.get("ran_once"):
         <span style="color:#ff8c00;">━</span>
         <span style="color:#333333;"> arcs très saturés</span><br>
         <span style="color:#1f6feb;font-weight:bold;">━ ÉLARGISSEMENT (corridor)</span><br>
-        <span style="color:#1a9b4b;font-weight:bold;">━ NOUVELLE ROUTE</span><br>
+        <span style="color:#d63384;font-weight:bold;">━ MISE À NIVEAU (rues locales)</span><br>
+        <span style="color:#1a9b4b;font-weight:bold;">━ NOUVELLE ROUTE (A*)</span><br>
         <span style="color:#d22b2b;font-weight:bold;">┄ À SUPPRIMER (Braess)</span>
     </div>
     """

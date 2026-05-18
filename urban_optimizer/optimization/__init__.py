@@ -15,6 +15,8 @@ from .network_design import (
     NewArcProposal,
     generate_corridor_candidates,
     generate_new_arc_candidates,
+    generate_new_route_candidates,
+    generate_upgrade_candidates,
     propose_urban_plan,
 )
 from .ranking import CandidateEvaluation, rank_candidates, select_under_budget
@@ -31,6 +33,8 @@ __all__ = [
     "NewArcProposal",
     "NewArcEvaluation",
     "generate_corridor_candidates",
+    "generate_upgrade_candidates",
+    "generate_new_route_candidates",
     "generate_new_arc_candidates",
     "propose_urban_plan",
     # Scoring et profils maire

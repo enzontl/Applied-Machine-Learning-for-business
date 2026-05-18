@@ -37,6 +37,9 @@ from urban_optimizer.assignment.frank_wolfe import (
 from urban_optimizer.assignment.result import AssignmentResult
 from urban_optimizer.config import BPR_ALPHA, BPR_BETA
 from urban_optimizer.demand.od_matrix import ODMatrix
+from shapely.strtree import STRtree as _STRtree
+from shapely.geometry import Point as _Point
+
 from urban_optimizer.network.buildings import ObstacleIndex
 
 # Alias de rétrocompatibilité pour les tests qui importent BuildingIndex directement
@@ -92,9 +95,11 @@ class NewArcProposal:
     detour_before: float
     u_xy: tuple[float, float]
     v_xy: tuple[float, float]
-    # Corridor mode — liste des edge IDs et coordonnées du tracé routé
+    # Mode routé sur rues existantes — liste des edge IDs et coordonnées
     edge_ids: list[int] = field(default_factory=list)
     corridor_xy: list[tuple[float, float]] = field(default_factory=list)
+    # "corridor" = élargissement axe saturé | "upgrade" = mise à niveau rues locales
+    proposal_type: str = field(default="corridor")
 
     def geometry(self) -> LineString:
         if len(self.corridor_xy) >= 2:
@@ -276,6 +281,135 @@ def generate_corridor_candidates(
     return top
 
 
+def generate_upgrade_candidates(
+    network: UrbanNetwork,
+    od: ODMatrix,
+    *,
+    ue: AssignmentResult | None = None,
+    min_length_m: float = 400.0,
+    max_length_m: float = 6_000.0,
+    min_detour_ratio: float = 1.25,
+    capacity_threshold: float = 1_800.0,
+    saturation_avoid: float = 0.35,
+    max_candidates: int = 80,
+) -> list[NewArcProposal]:
+    """Identifie des petites rues à transformer en axe principal (mise à niveau).
+
+    Contrairement aux corridors (qui élargissent des axes déjà utilisés), cette
+    fonction cherche des chemins passant par des rues de **faible capacité et peu
+    chargées** (résidentiel, tertiary) qui pourraient devenir un itinéraire
+    alternatif si elles étaient mises à niveau.
+
+    Le tracé suit les rues existantes — aucun bâtiment ne peut être traversé.
+    La simulation est identique aux corridors (capacité ×2 via _CorridorContext).
+    """
+    g = network.graph
+    nodes_xy = network.nodes_xy
+    n_edges = g.ecount()
+
+    capacity = np.asarray(g.es["capacity"], dtype=float)
+    lengths = np.asarray(g.es["length_m"], dtype=float)
+    hw_types = g.es["highway"]
+    free_speeds = g.es["free_speed_kmh"]
+
+    sat_arr = ue.flows / np.maximum(capacity, 1.0) if ue is not None else np.zeros(n_edges)
+
+    # Poids : privilégier rues peu chargées et faible capacité
+    # On évite les axes déjà saturés (pas le bon endroit pour une mise à niveau)
+    # et les grandes artères (déjà bien dimensionnées)
+    route_weights = lengths.copy()
+    route_weights[sat_arr > saturation_avoid] *= 8.0
+    route_weights[capacity > capacity_threshold] *= 4.0
+
+    demand_nodes = sorted({od.zone_to_node[z] for z in od.zone_ids})
+    if len(demand_nodes) < 2:
+        return []
+    logger.info(f"NDP mise à niveau — {len(demand_nodes)} nœuds OD candidats")
+
+    od_lookup = _zone_demand_lookup(od)
+    coords = np.array([nodes_xy[n] for n in demand_nodes])
+    path_lengths = _shortest_length(g, demand_nodes, demand_nodes)
+
+    proposals: list[tuple[float, NewArcProposal]] = []
+    n = len(demand_nodes)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            ux, uy = coords[i]
+            vx, vy = coords[j]
+            euclid = float(hypot(ux - vx, uy - vy))
+
+            path_len = min(path_lengths[i, j], path_lengths[j, i])
+            if not np.isfinite(path_len) or path_len <= 0:
+                continue
+            detour = path_len / euclid
+            if detour < min_detour_ratio:
+                continue
+
+            u_node = demand_nodes[i]
+            v_node = demand_nodes[j]
+
+            epaths = g.get_shortest_paths(
+                u_node, v_node,
+                weights=route_weights.tolist(),
+                output="epath",
+            )
+            if not epaths or not epaths[0]:
+                continue
+            edge_ids = epaths[0]
+
+            # Ne retenir que les corridors qui passent majoritairement par des petites rues
+            edge_caps = [capacity[e] for e in edge_ids]
+            if float(np.median(edge_caps)) > capacity_threshold:
+                continue  # déjà un axe principal — pas une mise à niveau
+
+            corridor_length = float(sum(lengths[e] for e in edge_ids))
+            if corridor_length < min_length_m or corridor_length > max_length_m:
+                continue
+
+            vpaths = g.get_shortest_paths(
+                u_node, v_node,
+                weights=route_weights.tolist(),
+                output="vpath",
+            )
+            vpath = vpaths[0] if vpaths else []
+            corridor_xy = [nodes_xy[v] for v in vpath if v in nodes_xy]
+
+            hw_list = [hw_types[e] for e in edge_ids]
+            corridor_hw = max(hw_list, key=lambda h: _HW_RANK.get(h, 0))
+            corridor_cap = float(np.min(edge_caps))
+            corridor_speed = float(np.min([free_speeds[e] for e in edge_ids]))
+            avg_sat = float(np.mean([sat_arr[e] for e in edge_ids]))
+
+            cost_per_m = _widening_cost_per_m(corridor_hw)
+            total_cost = corridor_length * cost_per_m
+
+            demand = od_lookup.get((u_node, v_node), 0.0) + od_lookup.get((v_node, u_node), 0.0)
+            proxy = (path_len - euclid) * max(1.0, demand) * (1.0 + (1.0 - avg_sat))
+
+            proposals.append((
+                proxy,
+                NewArcProposal(
+                    u_node=u_node, v_node=v_node,
+                    length_m=corridor_length,
+                    highway=corridor_hw,
+                    capacity=corridor_cap,
+                    free_speed_kmh=corridor_speed,
+                    construction_cost_eur=total_cost,
+                    detour_before=detour,
+                    u_xy=(ux, uy), v_xy=(vx, vy),
+                    edge_ids=edge_ids,
+                    corridor_xy=corridor_xy,
+                    proposal_type="upgrade",
+                ),
+            ))
+
+    proposals.sort(key=lambda x: -x[0])
+    top = [p for _, p in proposals[:max_candidates]]
+    logger.info(f"NDP mise à niveau — {len(top)} candidats retenus (sur {len(proposals)} générés)")
+    return top
+
+
 # ── Génération d'arcs en ligne droite (mode hérité, conservé pour les tests) ─
 
 def generate_new_arc_candidates(
@@ -351,6 +485,271 @@ def generate_new_arc_candidates(
     proposals.sort(key=lambda x: -x[0])
     top = [p for _, p in proposals[:max_candidates]]
     logger.info(f"NDP — {len(top)} candidats retenus (sur {len(proposals)} générés)")
+    return top
+
+
+# ── Routage A* pour nouvelles routes (évitement d'obstacles) ─────────────────
+
+# Coût de construction d'un pont (€/m) — voies ferrées ou cours d'eau
+_BRIDGE_COST_PER_M = 18_000.0
+
+
+def _route_avoiding_obstacles(
+    u_xy: tuple[float, float],
+    v_xy: tuple[float, float],
+    hard_geoms: list,
+    soft_geoms: list,
+    *,
+    margin_m: float = 350.0,
+    grid_n: int = 22,
+    bridge_factor: float = 5.0,
+    buf_m: float = 7.0,
+) -> tuple[list[tuple[float, float]] | None, float]:
+    """A* sur grille de waypoints entre u et v.
+
+    Contourne les obstacles durs (bâtiments, parcs).
+    Traverse les obstacles doux (voies ferrées, eau) avec surcoût bridge_factor.
+
+    Returns:
+        (chemin, longueur_pont_m) ou (None, 0) si aucun chemin trouvé.
+    """
+    from heapq import heappush, heappop
+
+    x_min = min(u_xy[0], v_xy[0]) - margin_m
+    x_max = max(u_xy[0], v_xy[0]) + margin_m
+    y_min = min(u_xy[1], v_xy[1]) - margin_m
+    y_max = max(u_xy[1], v_xy[1]) + margin_m
+
+    W, H = x_max - x_min, y_max - y_min
+    cell = max(60.0, max(W, H) / grid_n)
+    nx_ = max(3, int(W / cell) + 1)
+    ny_ = max(3, int(H / cell) + 1)
+
+    hard_tree = _STRtree(hard_geoms) if hard_geoms else None
+    soft_tree = _STRtree(soft_geoms) if soft_geoms else None
+
+    # ── Grille de waypoints (on exclut les cellules dans un obstacle dur) ──
+    wpts: list[tuple[float, float]] = []
+    gmap: dict[tuple[int, int], int] = {}
+
+    for ix in range(nx_):
+        for iy in range(ny_):
+            cx = x_min + (ix + 0.5) * cell
+            cy = y_min + (iy + 0.5) * cell
+            if hard_tree:
+                pt_buf = _Point(cx, cy).buffer(buf_m)
+                hits = hard_tree.query(pt_buf)
+                if any(hard_geoms[h].intersects(pt_buf) for h in hits):
+                    continue
+            gmap[(ix, iy)] = len(wpts)
+            wpts.append((cx, cy))
+
+    start_i = len(wpts); wpts.append(u_xy)
+    end_i = len(wpts);   wpts.append(v_xy)
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(len(wpts))]
+
+    def _add_edge(ia: int, ib: int) -> None:
+        xa, ya = wpts[ia]
+        xb, yb = wpts[ib]
+        seg = LineString([(xa, ya), (xb, yb)])
+        seg_len = seg.length
+        if hard_tree:
+            buf_seg = seg.buffer(buf_m)
+            hits = hard_tree.query(buf_seg)
+            if any(hard_geoms[h].intersects(buf_seg) for h in hits):
+                return
+        bridge_len = 0.0
+        if soft_tree:
+            hits = soft_tree.query(seg)
+            if any(soft_geoms[h].intersects(seg) for h in hits):
+                bridge_len = seg_len
+        cost = seg_len + bridge_len * (bridge_factor - 1.0)
+        adj[ia].append((ib, cost))
+        adj[ib].append((ia, cost))
+
+    # 8-connectivité de la grille
+    for ix in range(nx_):
+        for iy in range(ny_):
+            ia = gmap.get((ix, iy))
+            if ia is None:
+                continue
+            for dx, dy in [(1, 0), (0, 1), (1, 1), (1, -1)]:
+                ib = gmap.get((ix + dx, iy + dy))
+                if ib is None:
+                    continue
+                _add_edge(ia, ib)
+
+    # Connecter départ/arrivée à la grille
+    for sp_i, (sx, sy) in [(start_i, u_xy), (end_i, v_xy)]:
+        ix0 = int((sx - x_min) / cell)
+        iy0 = int((sy - y_min) / cell)
+        for dix in range(-2, 3):
+            for diy in range(-2, 3):
+                nb = gmap.get((ix0 + dix, iy0 + diy))
+                if nb is not None:
+                    _add_edge(sp_i, nb)
+
+    # A*
+    ex, ey = v_xy
+    def _h(i: int) -> float:
+        return hypot(wpts[i][0] - ex, wpts[i][1] - ey)
+
+    heap: list = [(float(_h(start_i)), 0.0, start_i)]
+    dist: dict[int, float] = {start_i: 0.0}
+    parent: dict[int, int | None] = {start_i: None}
+    visited: set[int] = set()
+
+    while heap:
+        _, g, cur = heappop(heap)
+        if cur in visited:
+            continue
+        visited.add(cur)
+        if cur == end_i:
+            path: list[tuple[float, float]] = []
+            node: int | None = end_i
+            while node is not None:
+                path.append(wpts[node])
+                node = parent[node]
+            path.reverse()
+            # Longueur des segments en pont
+            bridge_m = 0.0
+            if soft_tree and len(path) > 1:
+                for k in range(len(path) - 1):
+                    seg = LineString([path[k], path[k + 1]])
+                    hits = soft_tree.query(seg)
+                    if any(soft_geoms[h].intersects(seg) for h in hits):
+                        bridge_m += seg.length
+            return path, bridge_m
+        for nb, cost in adj[cur]:
+            if nb in visited:
+                continue
+            new_g = g + cost
+            if new_g < dist.get(nb, float("inf")):
+                dist[nb] = new_g
+                parent[nb] = cur
+                heappush(heap, (new_g + _h(nb), new_g, nb))
+
+    return None, 0.0
+
+
+def generate_new_route_candidates(
+    network: UrbanNetwork,
+    od: ODMatrix,
+    *,
+    ue: AssignmentResult | None = None,
+    obstacle_index: ObstacleIndex | None = None,
+    soft_index: ObstacleIndex | None = None,
+    min_length_m: float = 500.0,
+    max_length_m: float = 6_000.0,
+    min_detour_ratio: float = 1.40,
+    max_candidates: int = 40,
+) -> list[NewArcProposal]:
+    """Propose de nouvelles routes via A* sur grille, contournant les obstacles.
+
+    Obstacles durs (bâtiments, parcs) : contournés.
+    Obstacles doux (voies ferrées, cours d'eau) : traversés par pont, coût majoré.
+    Le tracé retourné suit de vrais segments courts — aucun bâtiment n'est traversé.
+    """
+    if obstacle_index is None:
+        return []
+
+    g = network.graph
+    nodes_xy = network.nodes_xy
+
+    hard_geoms = list(obstacle_index._tree.geometries)
+    soft_geoms = list(soft_index._tree.geometries) if soft_index else []
+
+    demand_nodes = sorted({od.zone_to_node[z] for z in od.zone_ids})
+    if len(demand_nodes) < 2:
+        return []
+    logger.info(f"NDP nouvelles routes (A*) — {len(demand_nodes)} nœuds OD candidats")
+
+    od_lookup = _zone_demand_lookup(od)
+    coords = np.array([nodes_xy[n] for n in demand_nodes])
+    path_lengths = _shortest_length(g, demand_nodes, demand_nodes)
+
+    proposals: list[tuple[float, NewArcProposal]] = []
+    n = len(demand_nodes)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            ux, uy = coords[i]
+            vx, vy = coords[j]
+            euclid = float(hypot(ux - vx, uy - vy))
+
+            path_len = min(path_lengths[i, j], path_lengths[j, i])
+            if not np.isfinite(path_len) or path_len <= 0:
+                continue
+            detour = path_len / euclid
+            if detour < min_detour_ratio:
+                continue
+
+            u_node = demand_nodes[i]
+            v_node = demand_nodes[j]
+
+            # Optimisation : si la ligne droite ne croise aucun obstacle dur,
+            # on l'utilise directement (pas besoin d'A*)
+            straight = LineString([(ux, uy), (vx, vy)])
+            hard_tree = _STRtree(hard_geoms) if hard_geoms else None
+            if hard_tree:
+                buf_seg = straight.buffer(7.0)
+                hits = hard_tree.query(buf_seg)
+                needs_astar = any(hard_geoms[h].intersects(buf_seg) for h in hits)
+            else:
+                needs_astar = False
+
+            if needs_astar:
+                route_xy, bridge_len = _route_avoiding_obstacles(
+                    (ux, uy), (vx, vy), hard_geoms, soft_geoms,
+                )
+                if route_xy is None:
+                    continue
+            else:
+                route_xy = [(ux, uy), (vx, vy)]
+                bridge_len = 0.0
+                if soft_geoms:
+                    soft_t = _STRtree(soft_geoms)
+                    hits = soft_t.query(straight)
+                    if any(soft_geoms[h].intersects(straight) for h in hits):
+                        bridge_len = euclid
+
+            route_length = float(sum(
+                hypot(route_xy[k+1][0] - route_xy[k][0], route_xy[k+1][1] - route_xy[k][1])
+                for k in range(len(route_xy) - 1)
+            ))
+            if route_length < min_length_m or route_length > max_length_m:
+                continue
+
+            hw, cap, speed, normal_cost_per_m = _new_arc_specs(route_length)
+            normal_len = route_length - bridge_len
+            total_cost = normal_len * normal_cost_per_m + bridge_len * _BRIDGE_COST_PER_M
+
+            demand = od_lookup.get((u_node, v_node), 0.0) + od_lookup.get((v_node, u_node), 0.0)
+            proxy = (path_len - euclid) * max(1.0, demand)
+
+            proposals.append((
+                proxy,
+                NewArcProposal(
+                    u_node=u_node, v_node=v_node,
+                    length_m=route_length,
+                    highway=hw, capacity=cap, free_speed_kmh=speed,
+                    construction_cost_eur=total_cost,
+                    detour_before=detour,
+                    u_xy=(ux, uy), v_xy=(vx, vy),
+                    edge_ids=[],           # → _NewArcContext pour la simulation
+                    corridor_xy=route_xy,
+                    proposal_type="new_route",
+                ),
+            ))
+
+    proposals.sort(key=lambda x: -x[0])
+    top = [p for _, p in proposals[:max_candidates]]
+    n_bridge = sum(1 for _, p in proposals[:max_candidates] if any(
+        hypot(p.corridor_xy[k+1][0]-p.corridor_xy[k][0],
+              p.corridor_xy[k+1][1]-p.corridor_xy[k][1]) > 0
+        for k in range(len(p.corridor_xy)-1)
+    ))
+    logger.info(f"NDP nouvelles routes — {len(top)} candidats retenus")
     return top
 
 
@@ -494,61 +893,66 @@ def propose_urban_plan(
     max_fw_evals: int = 15,
     fw_max_iter: int = 25,
     fw_tol: float = 5e-3,
-    building_index: ObstacleIndex | None = None,
+    building_index: ObstacleIndex | None = None,    # rétrocompat (= obstacle_index)
+    obstacle_index: ObstacleIndex | None = None,    # obstacles durs (bâtiments, parcs)
+    soft_index: ObstacleIndex | None = None,        # ponts (voies ferrées, eau)
 ) -> tuple[list[NewArcEvaluation], CityScore]:
-    """Pipeline complet : génère et évalue deux types d'interventions.
+    """Pipeline complet : trois types d'interventions sur le réseau.
 
-    - **Corridors** : élargissement (×2 capacité) d'un chemin sur le réseau existant.
-    - **Nouvelles routes** : arc en ligne droite filtré par l'index d'obstacles
-      (bâtiments, eau, parcs, voies ferrées) — uniquement si *building_index* fourni.
+    1. **Corridors** (bleu) : élargissement (×2 cap.) d'axes existants saturés.
+    2. **Mises à niveau** (rose) : transformation de petites rues en axes de transit.
+    3. **Nouvelles routes** (vert) : A* contournant bâtiments/parcs, surcoût pont si
+       traversée de voie ferrée ou cours d'eau.
 
-    Les deux types sont mélangés dans les évaluations FW (split 60/40).
-
-    Returns:
-        ``(plan, baseline_score)`` — liste des interventions retenues (BCR décroissant).
+    Split FW : ~50 % corridors, ~25 % mises à niveau, ~25 % nouvelles routes.
     """
+    _obs = obstacle_index or building_index
+
     baseline_score = score_network(baseline_ue, profile)
     logger.info(f"Score baseline ({profile.name}) : {baseline_score.composite_score:,.0f} €/an")
 
-    # ── Corridors à élargir ───────────────────────────────────────────────
-    n_corridor_slots = max(1, int(max_fw_evals * 0.6))
+    # Slots par type
+    n_corr  = max(1, int(max_fw_evals * 0.50))
+    n_upgr  = max(1, int(max_fw_evals * 0.25))
+    n_new   = max_fw_evals - n_corr - n_upgr
+
     corridors = generate_corridor_candidates(
-        network, od,
-        ue=baseline_ue,
-        max_candidates=max_proposals,
+        network, od, ue=baseline_ue, max_candidates=max_proposals,
     )
-
-    # ── Nouvelles routes (ligne droite filtrée obstacles) ─────────────────
-    n_new_slots = max_fw_evals - n_corridor_slots
-    new_arcs: list[NewArcProposal] = []
-    if building_index is not None and n_new_slots > 0:
-        new_arcs = generate_new_arc_candidates(
-            network, od,
+    upgrades = generate_upgrade_candidates(
+        network, od, ue=baseline_ue, max_candidates=max_proposals,
+    )
+    new_routes: list[NewArcProposal] = []
+    if _obs is not None and n_new > 0:
+        new_routes = generate_new_route_candidates(
+            network, od, ue=baseline_ue,
+            obstacle_index=_obs, soft_index=soft_index,
             max_candidates=max_proposals,
-            building_index=building_index,
         )
-        logger.info(f"NDP nouvelles routes — {len(new_arcs)} candidats (filtre obstacles actif)")
-    elif n_new_slots > 0:
-        logger.info("NDP nouvelles routes — désactivé (pas d'obstacle_index fourni)")
+        logger.info(f"NDP nouvelles routes — {len(new_routes)} candidats A*")
 
-    # ── Sélection des candidats à évaluer (60 % corridors, 40 % nouvelles routes) ─
-    pre: list[NewArcProposal] = []
-    pre += corridors[:n_corridor_slots]
-    pre += new_arcs[:n_new_slots]
-    # Si un type en manque, on complète avec l'autre
-    shortage = max_fw_evals - len(pre)
-    if shortage > 0:
-        extra_c = corridors[n_corridor_slots: n_corridor_slots + shortage]
-        extra_n = new_arcs[n_new_slots: n_new_slots + shortage]
-        pre += extra_c or extra_n
+    def _fill(primary, secondary, n):
+        picked = list(primary[:n])
+        if len(picked) < n:
+            picked += list(secondary[: n - len(picked)])
+        return picked
+
+    pre: list[NewArcProposal] = (
+        _fill(corridors,   upgrades,    n_corr)
+        + _fill(upgrades,  corridors,   n_upgr)
+        + _fill(new_routes, corridors,  n_new)
+    )
 
     if not pre:
         logger.warning("Aucun candidat trouvé.")
         return [], baseline_score
 
+    counts = {t: sum(p.proposal_type == t for p in pre)
+              for t in ("corridor", "upgrade", "new_route")}
     logger.info(
-        f"NDP — {len(pre)} candidats ({sum(p.is_corridor for p in pre)} corridors + "
-        f"{sum(not p.is_corridor for p in pre)} nouvelles routes) pour évaluation FW"
+        f"NDP — {len(pre)} candidats pour FW : "
+        f"{counts['corridor']} corridors + {counts['upgrade']} mises à niveau + "
+        f"{counts['new_route']} nouvelles routes"
     )
 
     evals: list[NewArcEvaluation] = []
@@ -575,10 +979,11 @@ def propose_urban_plan(
         chosen.append(ev)
         spent += ev.cost_eur
 
-    n_c = sum(e.proposal.is_corridor for e in chosen)
-    n_n = sum(not e.proposal.is_corridor for e in chosen)
+    cnt = {t: sum(e.proposal.proposal_type == t for e in chosen)
+           for t in ("corridor", "upgrade", "new_route")}
     logger.info(
-        f"NDP — {len(chosen)} interventions retenues ({n_c} corridors + {n_n} nouvelles routes), "
-        f"coût total = {spent:,.0f}€ (budget {budget_eur:,.0f}€)"
+        f"NDP — {len(chosen)} retenues "
+        f"({cnt['corridor']} corridors + {cnt['upgrade']} mises à niveau + "
+        f"{cnt['new_route']} nouvelles routes), coût = {spent:,.0f}€ / {budget_eur:,.0f}€"
     )
     return chosen, baseline_score
