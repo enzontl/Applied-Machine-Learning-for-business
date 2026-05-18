@@ -30,7 +30,7 @@ from urban_optimizer.assignment import (
 from urban_optimizer.config import CRS_WGS84
 from urban_optimizer.demand import generate_od_matrix
 from urban_optimizer.diagnosis import diagnose
-from urban_optimizer.network import build_network, load_buildings
+from urban_optimizer.network import build_network, load_obstacles
 from urban_optimizer.optimization import (
     ALL_PROFILES,
     PROFILE_BY_NAME,
@@ -55,8 +55,8 @@ def cached_network(city: str, include_route500: bool):
 
 
 @st.cache_resource(show_spinner=False)
-def cached_buildings(city: str):
-    return load_buildings(city)
+def cached_obstacles(city: str):
+    return load_obstacles(city)
 
 
 @st.cache_data(show_spinner=False)
@@ -168,15 +168,15 @@ if run_btn or st.session_state.get("ran_once"):
     st.markdown(f"### Plan urbain proposé — profil {profile.label}")
     with st.spinner(f"Génération du plan urbain (jusqu'à {max_fw_evals} arcs évalués)…"):
         t = time.time()
-        building_index = cached_buildings(city)   # ← ajouter cette ligne
+        obstacle_index = cached_obstacles(city)
         plan, _ = propose_urban_plan(
             net, od, profile, ue,
             budget_eur=budget_eur,
             max_proposals=max_candidates,
             max_fw_evals=max_fw_evals,
-            fw_max_iter=60, fw_tol=1e-3,
-            building_index=building_index,         # ← ajouter ce paramètre
-)
+            fw_max_iter=25, fw_tol=5e-3,
+            building_index=obstacle_index,
+        )
         t_plan = time.time() - t
     st.caption(f"Plan généré en {t_plan:.1f}s")
 
@@ -186,6 +186,7 @@ if run_btn or st.session_state.get("ran_once"):
             p = ev.proposal
             rows.append({
                 "rang": i,
+                "action": "élargissement" if p.is_corridor else "nouvelle route",
                 "type": p.highway,
                 "longueur": f"{p.length_m:.0f} m",
                 "détour avant": f"{p.detour_before:.2f}×",
@@ -296,16 +297,18 @@ if run_btn or st.session_state.get("ran_once"):
         gs = gpd.GeoSeries([_LineString(coords_lambert)], crs=net.crs)
         return gs.to_crs(CRS_WGS84).iloc[0]
 
-    # 🟦 CORRIDORS À ÉLARGIR
+    # 🟦 CORRIDORS À ÉLARGIR  🟩 NOUVELLES ROUTES
     for i, ev in enumerate(plan, start=1):
         p = ev.proposal
-        # Corridor mode : tracé réel sur les rues ; fallback ligne droite
+        is_corridor = p.is_corridor
+        color = "#1f6feb" if is_corridor else "#1a9b4b"
+        label = "ÉLARGISSEMENT" if is_corridor else "NOUVELLE ROUTE"
         raw_coords = p.corridor_xy if len(p.corridor_xy) >= 2 else [p.u_xy, p.v_xy]
         ll = to_wgs(raw_coords)
         map_coords = [(y, x) for x, y in ll.coords]
         folium.PolyLine(
-            map_coords, color="#1f6feb", weight=6, opacity=0.95,
-            tooltip=(f"ÉLARGISSEMENT #{i} • {p.highway} {p.length_m:.0f}m • "
+            map_coords, color=color, weight=6, opacity=0.95,
+            tooltip=(f"{label} #{i} • {p.highway} {p.length_m:.0f}m • "
                      f"coût {p.construction_cost_eur:,.0f}€ • "
                      f"bénéf {ev.annual_benefit_eur:+,.0f}€/an"),
         ).add_to(m)
@@ -313,7 +316,7 @@ if run_btn or st.session_state.get("ran_once"):
         mid = ll.interpolate(0.5, normalized=True)
         folium.CircleMarker(
             [mid.y, mid.x],
-            radius=11, color="#1f6feb", fill=True, fill_opacity=0.95,
+            radius=11, color=color, fill=True, fill_opacity=0.95,
         ).add_to(m)
         folium.map.Marker(
             [mid.y, mid.x],
@@ -349,7 +352,8 @@ if run_btn or st.session_state.get("ran_once"):
         <span style="color:#333333;"> réseau existant</span><br>
         <span style="color:#ff8c00;">━</span>
         <span style="color:#333333;"> arcs très saturés</span><br>
-        <span style="color:#1f6feb;font-weight:bold;">━ ÉLARGISSEMENT PROPOSÉ</span><br>
+        <span style="color:#1f6feb;font-weight:bold;">━ ÉLARGISSEMENT (corridor)</span><br>
+        <span style="color:#1a9b4b;font-weight:bold;">━ NOUVELLE ROUTE</span><br>
         <span style="color:#d22b2b;font-weight:bold;">┄ À SUPPRIMER (Braess)</span>
     </div>
     """

@@ -37,7 +37,10 @@ from urban_optimizer.assignment.frank_wolfe import (
 from urban_optimizer.assignment.result import AssignmentResult
 from urban_optimizer.config import BPR_ALPHA, BPR_BETA
 from urban_optimizer.demand.od_matrix import ODMatrix
-from urban_optimizer.network.buildings import BuildingIndex
+from urban_optimizer.network.buildings import ObstacleIndex
+
+# Alias de rétrocompatibilité pour les tests qui importent BuildingIndex directement
+BuildingIndex = ObstacleIndex
 from urban_optimizer.network.urban_network import UrbanNetwork
 from urban_optimizer.utils.logging import get_logger
 
@@ -491,28 +494,62 @@ def propose_urban_plan(
     max_fw_evals: int = 15,
     fw_max_iter: int = 25,
     fw_tol: float = 5e-3,
-    building_index: BuildingIndex | None = None,   # ignoré en mode corridor
+    building_index: ObstacleIndex | None = None,
 ) -> tuple[list[NewArcEvaluation], CityScore]:
-    """Pipeline complet : génère des corridors à élargir, les évalue, sélectionne sous budget.
+    """Pipeline complet : génère et évalue deux types d'interventions.
+
+    - **Corridors** : élargissement (×2 capacité) d'un chemin sur le réseau existant.
+    - **Nouvelles routes** : arc en ligne droite filtré par l'index d'obstacles
+      (bâtiments, eau, parcs, voies ferrées) — uniquement si *building_index* fourni.
+
+    Les deux types sont mélangés dans les évaluations FW (split 60/40).
 
     Returns:
-        ``(plan, baseline_score)`` — liste des élargissements retenus (BCR décroissant).
+        ``(plan, baseline_score)`` — liste des interventions retenues (BCR décroissant).
     """
     baseline_score = score_network(baseline_ue, profile)
     logger.info(f"Score baseline ({profile.name}) : {baseline_score.composite_score:,.0f} €/an")
 
-    raw = generate_corridor_candidates(
+    # ── Corridors à élargir ───────────────────────────────────────────────
+    n_corridor_slots = max(1, int(max_fw_evals * 0.6))
+    corridors = generate_corridor_candidates(
         network, od,
         ue=baseline_ue,
         max_candidates=max_proposals,
     )
-    if not raw:
-        logger.warning("Aucun corridor candidat trouvé.")
+
+    # ── Nouvelles routes (ligne droite filtrée obstacles) ─────────────────
+    n_new_slots = max_fw_evals - n_corridor_slots
+    new_arcs: list[NewArcProposal] = []
+    if building_index is not None and n_new_slots > 0:
+        new_arcs = generate_new_arc_candidates(
+            network, od,
+            max_candidates=max_proposals,
+            building_index=building_index,
+        )
+        logger.info(f"NDP nouvelles routes — {len(new_arcs)} candidats (filtre obstacles actif)")
+    elif n_new_slots > 0:
+        logger.info("NDP nouvelles routes — désactivé (pas d'obstacle_index fourni)")
+
+    # ── Sélection des candidats à évaluer (60 % corridors, 40 % nouvelles routes) ─
+    pre: list[NewArcProposal] = []
+    pre += corridors[:n_corridor_slots]
+    pre += new_arcs[:n_new_slots]
+    # Si un type en manque, on complète avec l'autre
+    shortage = max_fw_evals - len(pre)
+    if shortage > 0:
+        extra_c = corridors[n_corridor_slots: n_corridor_slots + shortage]
+        extra_n = new_arcs[n_new_slots: n_new_slots + shortage]
+        pre += extra_c or extra_n
+
+    if not pre:
+        logger.warning("Aucun candidat trouvé.")
         return [], baseline_score
 
-    # Le proxy score a déjà trié les candidats — on prend les top K directement.
-    pre = raw[:max_fw_evals]
-    logger.info(f"NDP corridors — {len(pre)} corridors sélectionnés pour évaluation FW")
+    logger.info(
+        f"NDP — {len(pre)} candidats ({sum(p.is_corridor for p in pre)} corridors + "
+        f"{sum(not p.is_corridor for p in pre)} nouvelles routes) pour évaluation FW"
+    )
 
     evals: list[NewArcEvaluation] = []
     for i, prop in enumerate(pre, start=1):
@@ -538,8 +575,10 @@ def propose_urban_plan(
         chosen.append(ev)
         spent += ev.cost_eur
 
+    n_c = sum(e.proposal.is_corridor for e in chosen)
+    n_n = sum(not e.proposal.is_corridor for e in chosen)
     logger.info(
-        f"NDP — {len(chosen)} élargissements retenus, coût total = {spent:,.0f}€ "
-        f"(budget {budget_eur:,.0f}€)"
+        f"NDP — {len(chosen)} interventions retenues ({n_c} corridors + {n_n} nouvelles routes), "
+        f"coût total = {spent:,.0f}€ (budget {budget_eur:,.0f}€)"
     )
     return chosen, baseline_score
