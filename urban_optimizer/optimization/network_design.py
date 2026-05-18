@@ -1,20 +1,24 @@
-"""Network design problem (NDP) : propose de **nouvelles routes**.
+"""Network design problem (NDP) : élargissement de corridors existants (Niveau 2).
 
-Approche en 3 temps pour rester traitable malgré la NP-difficulté du NDP :
+Approche corridor — au lieu de proposer une ligne droite (qui peut traverser
+des bâtiments), on cherche un chemin **sur le réseau existant** en pénalisant
+les arcs saturés, puis on propose de doubler sa capacité.
 
-1. **Génération de candidats** — pour chaque paire de nœuds (u, v) :
-   - distance euclidienne dans [min_length, max_length]
-   - détour graphique actuel (length(shortest_path) / euclidean) > seuil
-   - rang par proxy "détour gagné × demande approchée"
+Pipeline :
+1. **Génération de corridors** — pour chaque paire de nœuds OD :
+   - détour graphique ≥ seuil
+   - routing sur le graphe réel, arcs saturés pénalisés ×30
+   - rang par proxy (détour gagné × demande × saturation moyenne)
 
-2. **Pré-filtrage AoN** — on évalue chaque candidat avec une affectation
-   tout-ou-rien (très rapide). On garde les top-K par gain AoN.
+2. **Évaluation Frank-Wolfe** — pour chaque corridor candidat :
+   - capacité des arcs doublée temporairement
+   - FW relancé → nouveau VHT → bénéfice annuel
+   - restauration garantie (try/finally)
 
-3. **Évaluation fine** — on insère l'arc dans une copie du graphe, on
-   relance Frank-Wolfe (warm-start), on calcule le score du nouveau réseau.
-   Les arcs ajoutés sont restaurés à la fin (try/finally).
+3. **Sélection gloutonne** sous budget (BCR décroissant).
 
-La sélection finale est gloutonne par BCR (Benefit / Cost Ratio).
+Avantage clé : la géométrie suit des rues réelles, aucun bâtiment n'est jamais
+traversé.
 """
 
 from __future__ import annotations
@@ -43,17 +47,10 @@ from .score import CityScore, score_network
 logger = get_logger(__name__)
 
 
-# ── Paramètres de design ────────────────────────────────────────────────────
+# ── Coûts de construction / élargissement ────────────────────────────────────
 
-# Catégorie de nouvel arc selon sa longueur
 def _new_arc_specs(length_m: float) -> tuple[str, float, float, float]:
-    """Renvoie (highway_type, capacité véh/h, vitesse km/h, coût €/m).
-
-    Tarifs construction urbain (France, ordre de grandeur 2020-2025) :
-      tertiary  : ~3 M€/km — voie urbaine 1 voie/sens
-      secondary : ~6 M€/km — voie urbaine 2 voies/sens
-      primary   : ~10 M€/km — boulevard ou rocade
-    """
+    """(highway, capacité, vitesse, coût €/m) pour une nouvelle route en ligne droite."""
     if length_m < 500:
         return "tertiary", 1500.0, 50.0, 3_000.0
     if length_m < 2000:
@@ -61,19 +58,25 @@ def _new_arc_specs(length_m: float) -> tuple[str, float, float, float]:
     return "primary", 3000.0, 90.0, 10_000.0
 
 
+def _widening_cost_per_m(highway: str) -> float:
+    """Coût d'ajout d'une voie sur un arc existant (€/m) — 3-5× moins cher que neuf."""
+    if highway in ("motorway", "trunk", "primary"):
+        return 3_500.0
+    if highway in ("secondary", "tertiary"):
+        return 1_800.0
+    return 1_200.0
+
+
+# ── Dataclasses ──────────────────────────────────────────────────────────────
+
 @dataclass
 class NewArcProposal:
-    """Une proposition de construction de route.
+    """Une proposition d'intervention sur le réseau.
 
-    Attributes:
-        u_node, v_node: index des nœuds existants à connecter.
-        length_m: distance euclidienne entre les nœuds (m).
-        highway: catégorie déduite de la longueur.
-        capacity: véh/h du nouvel arc.
-        free_speed_kmh: vitesse libre.
-        construction_cost_eur: CAPEX estimé.
-        detour_before: ratio detour avant construction (length_path / euclidean).
-        u_xy, v_xy: coordonnées Lambert-93, pour la viz.
+    En mode **corridor** (edge_ids non vide) : élargissement d'un corridor
+    existant dont la géométrie suit les rues réelles.
+    En mode **arc** (edge_ids vide) : construction d'une nouvelle route en ligne
+    droite (mode hérité, conservé pour la compatibilité des tests).
     """
 
     u_node: int
@@ -86,9 +89,18 @@ class NewArcProposal:
     detour_before: float
     u_xy: tuple[float, float]
     v_xy: tuple[float, float]
+    # Corridor mode — liste des edge IDs et coordonnées du tracé routé
+    edge_ids: list[int] = field(default_factory=list)
+    corridor_xy: list[tuple[float, float]] = field(default_factory=list)
 
     def geometry(self) -> LineString:
+        if len(self.corridor_xy) >= 2:
+            return LineString(self.corridor_xy)
         return LineString([self.u_xy, self.v_xy])
+
+    @property
+    def is_corridor(self) -> bool:
+        return len(self.edge_ids) > 0
 
 
 @dataclass
@@ -99,23 +111,22 @@ class NewArcEvaluation:
     new_vht_h: float
     baseline_vht_h: float
     delta_vht_h: float                       # > 0 = amélioration
-    new_score_eur_year: float                # coût annuel pondéré profil
+    new_score_eur_year: float
     baseline_score_eur_year: float
-    annual_benefit_eur: float                # baseline − new
-    payback_years: float                     # CAPEX / bénéfice annuel
-    cost_eur: float                          # CAPEX pondéré profil
-    bcr: float                               # benefit / cost annuel
-    score: float = field(default=0.0)        # critère final = bénéfice − annuité
+    annual_benefit_eur: float
+    payback_years: float
+    cost_eur: float
+    bcr: float
+    score: float = field(default=0.0)
 
     @property
     def is_worth_it(self) -> bool:
         return self.annual_benefit_eur > 0 and self.cost_eur > 0
 
 
-# ── Génération de candidats ─────────────────────────────────────────────────
+# ── Utilitaires ──────────────────────────────────────────────────────────────
 
 def _shortest_length(g: ig.Graph, sources: list[int], targets: list[int]) -> np.ndarray:
-    """Matrice (n_src, n_tgt) des longueurs de plus courts chemins (m)."""
     mat = g.distances(source=sources, target=targets, weights="length_m")
     return np.asarray(mat, dtype=float)
 
@@ -131,6 +142,139 @@ def _zone_demand_lookup(od: ODMatrix) -> dict[tuple[int, int], float]:
     return lookup
 
 
+_HW_RANK = {"residential": 0, "tertiary": 1, "secondary": 2, "primary": 3, "trunk": 4, "motorway": 5}
+
+
+# ── Génération de corridors ───────────────────────────────────────────────────
+
+def generate_corridor_candidates(
+    network: UrbanNetwork,
+    od: ODMatrix,
+    *,
+    ue: AssignmentResult | None = None,
+    min_length_m: float = 300.0,
+    max_length_m: float = 5_000.0,
+    min_detour_ratio: float = 1.25,
+    saturation_threshold: float = 0.65,
+    max_candidates: int = 80,
+) -> list[NewArcProposal]:
+    """Identifie les corridors existants à élargir pour réduire la congestion.
+
+    Pour chaque paire (u, v) de nœuds OD avec un fort détour :
+    - Cherche le chemin sur le réseau réel en pénalisant les arcs saturés.
+    - Le corridor trouvé suit des rues existantes (pas de traversée de bâtiment).
+    - Scoré par (détour_gagné × demande × 1 + saturation_moy).
+
+    Args:
+        ue: résultat UE courant (pour calculer la saturation). Si None, on
+            suppose aucune saturation (routing sur le plus court chemin libre).
+    """
+    g = network.graph
+    nodes_xy = network.nodes_xy
+    n_edges = g.ecount()
+
+    capacity = np.asarray(g.es["capacity"], dtype=float)
+    lengths = np.asarray(g.es["length_m"], dtype=float)
+    hw_types = g.es["highway"]
+    free_speeds = g.es["free_speed_kmh"]
+
+    if ue is not None:
+        sat_arr = ue.flows / np.maximum(capacity, 1.0)
+    else:
+        sat_arr = np.zeros(n_edges)
+
+    # Poids pour le routing : on pénalise fortement les arcs saturés
+    route_weights = lengths.copy()
+    route_weights[sat_arr > saturation_threshold] *= 30.0
+
+    demand_nodes = sorted({od.zone_to_node[z] for z in od.zone_ids})
+    if len(demand_nodes) < 2:
+        return []
+    logger.info(f"NDP corridors — {len(demand_nodes)} nœuds OD candidats")
+
+    od_lookup = _zone_demand_lookup(od)
+    coords = np.array([nodes_xy[n] for n in demand_nodes])
+    path_lengths = _shortest_length(g, demand_nodes, demand_nodes)
+
+    proposals: list[tuple[float, NewArcProposal]] = []
+    n = len(demand_nodes)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            ux, uy = coords[i]
+            vx, vy = coords[j]
+            euclid = float(hypot(ux - vx, uy - vy))
+
+            path_len = min(path_lengths[i, j], path_lengths[j, i])
+            if not np.isfinite(path_len) or path_len <= 0:
+                continue
+            detour = path_len / euclid
+            if detour < min_detour_ratio:
+                continue
+
+            u_node = demand_nodes[i]
+            v_node = demand_nodes[j]
+
+            # Trouver le corridor (routing avec pénalité saturation)
+            epaths = g.get_shortest_paths(
+                u_node, v_node,
+                weights=route_weights.tolist(),
+                output="epath",
+            )
+            if not epaths or not epaths[0]:
+                continue
+            edge_ids = epaths[0]
+
+            corridor_length = float(sum(lengths[e] for e in edge_ids))
+            if corridor_length < min_length_m or corridor_length > max_length_m:
+                continue
+
+            # Coordonnées réelles du tracé (pour la viz)
+            vpaths = g.get_shortest_paths(
+                u_node, v_node,
+                weights=route_weights.tolist(),
+                output="vpath",
+            )
+            vpath = vpaths[0] if vpaths else []
+            corridor_xy = [nodes_xy[v] for v in vpath if v in nodes_xy]
+
+            # Propriétés du corridor
+            hw_list = [hw_types[e] for e in edge_ids]
+            corridor_hw = max(hw_list, key=lambda h: _HW_RANK.get(h, 0))
+            corridor_cap = float(np.min([capacity[e] for e in edge_ids]))
+            corridor_speed = float(np.min([free_speeds[e] for e in edge_ids]))
+            avg_sat = float(np.mean([sat_arr[e] for e in edge_ids]))
+
+            cost_per_m = _widening_cost_per_m(corridor_hw)
+            total_cost = corridor_length * cost_per_m
+
+            demand = od_lookup.get((u_node, v_node), 0.0) + od_lookup.get((v_node, u_node), 0.0)
+            proxy = (path_len - euclid) * max(1.0, demand) * (1.0 + avg_sat)
+
+            proposals.append((
+                proxy,
+                NewArcProposal(
+                    u_node=u_node, v_node=v_node,
+                    length_m=corridor_length,
+                    highway=corridor_hw,
+                    capacity=corridor_cap,
+                    free_speed_kmh=corridor_speed,
+                    construction_cost_eur=total_cost,
+                    detour_before=detour,
+                    u_xy=(ux, uy), v_xy=(vx, vy),
+                    edge_ids=edge_ids,
+                    corridor_xy=corridor_xy,
+                ),
+            ))
+
+    proposals.sort(key=lambda x: -x[0])
+    top = [p for _, p in proposals[:max_candidates]]
+    logger.info(f"NDP corridors — {len(top)} corridors retenus (sur {len(proposals)} générés)")
+    return top
+
+
+# ── Génération d'arcs en ligne droite (mode hérité, conservé pour les tests) ─
+
 def generate_new_arc_candidates(
     network: UrbanNetwork,
     od: ODMatrix,
@@ -141,17 +285,10 @@ def generate_new_arc_candidates(
     max_candidates: int = 80,
     building_index: BuildingIndex | None = None,
 ) -> list[NewArcProposal]:
-    """Cherche les paires de nœuds (u, v) qui justifieraient un nouvel arc.
+    """Mode hérité : propose des arcs en ligne droite (peut traverser des bâtiments).
 
-    On restreint aux nœuds **rattachés à une zone OD** (sinon il n'y a pas de
-    demande directe et le gain est marginal). Pour chaque paire :
-
-    - distance euclidienne dans la fenêtre
-    - détour graphique actuel ≥ ``min_detour_ratio``
-    - tracé rectiligne ne traversant aucun bâtiment (si *building_index* fourni)
-
-    Score de proxy = (détour gagné) × max(1, demande directe OD).
-    Top ``max_candidates`` retournés.
+    Conservé pour la rétrocompatibilité des tests. Le pipeline principal utilise
+    désormais ``generate_corridor_candidates``.
     """
     g = network.graph
     nodes_xy = network.nodes_xy
@@ -159,11 +296,9 @@ def generate_new_arc_candidates(
     demand_nodes = sorted({od.zone_to_node[z] for z in od.zone_ids})
     if len(demand_nodes) < 2:
         return []
-    logger.info(f"NDP — {len(demand_nodes)} nœuds candidats")
 
     coords = np.array([nodes_xy[n] for n in demand_nodes])
     paths = _shortest_length(g, demand_nodes, demand_nodes)
-
     od_lookup = _zone_demand_lookup(od)
 
     proposals: list[tuple[float, NewArcProposal]] = []
@@ -177,14 +312,13 @@ def generate_new_arc_candidates(
             if euclid < min_length_m or euclid > max_length_m:
                 continue
 
-            path_len = min(paths[i, j], paths[j, i])  # graphe orienté → min
+            path_len = min(paths[i, j], paths[j, i])
             if not np.isfinite(path_len) or path_len <= 0:
                 continue
             detour = path_len / euclid
             if detour < min_detour_ratio:
                 continue
 
-            # Filtre bâtiments : on rejette si le tracé rectiligne traverse un bâtiment
             if building_index is not None:
                 segment = LineString([(ux, uy), (vx, vy)])
                 if building_index.crosses(segment):
@@ -217,7 +351,31 @@ def generate_new_arc_candidates(
     return top
 
 
-# ── Insertion / retrait temporaire d'un arc ─────────────────────────────────
+# ── Contextes temporaires (modification réversible du graphe) ─────────────────
+
+class _CorridorContext:
+    """Double temporairement la capacité des arcs du corridor. Restauration garantie."""
+
+    def __init__(self, g: ig.Graph, prop: NewArcProposal, uplift: float = 2.0):
+        self.g = g
+        self.edge_ids = prop.edge_ids
+        self.uplift = uplift
+        self.original_caps: list[float] = []
+
+    def __enter__(self):
+        caps = list(self.g.es["capacity"])
+        for eid in self.edge_ids:
+            self.original_caps.append(caps[eid])
+            caps[eid] = caps[eid] * self.uplift
+        self.g.es["capacity"] = caps
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        caps = list(self.g.es["capacity"])
+        for eid, orig in zip(self.edge_ids, self.original_caps):
+            caps[eid] = orig
+        self.g.es["capacity"] = caps
+
 
 class _NewArcContext:
     """Ajoute un arc bidirectionnel temporaire au graphe. Restauration garantie."""
@@ -251,7 +409,7 @@ class _NewArcContext:
             self.added_eids = []
 
 
-# ── Évaluation d'un candidat ────────────────────────────────────────────────
+# ── Évaluation Frank-Wolfe ────────────────────────────────────────────────────
 
 def _evaluate(
     network: UrbanNetwork,
@@ -265,19 +423,17 @@ def _evaluate(
     tol: float,
 ) -> NewArcEvaluation:
     g = network.graph
-    with _NewArcContext(g, prop):
+    ctx = _CorridorContext(g, prop) if prop.is_corridor else _NewArcContext(g, prop)
+    with ctx:
         new_ue = solve_user_equilibrium(network, od, max_iter=max_iter, tol=tol)
 
     new_score = score_network(new_ue, profile)
     delta_vht = baseline_ue.vht - new_ue.vht
     annual_benefit = baseline_score.total_annual_cost_eur - new_score.total_annual_cost_eur
 
-    # Le profil maire amplifie ou atténue le coût ressenti de la construction
     cost = prop.construction_cost_eur * profile.w_construction
-
     bcr = annual_benefit / cost if cost > 0 else 0.0
     payback = cost / annual_benefit if annual_benefit > 0 else float("inf")
-    # Score = bénéfice annuel net, après amortissement linéaire sur 20 ans
     amortization = cost / 20.0
     score = annual_benefit - amortization
 
@@ -296,7 +452,7 @@ def _evaluate(
     )
 
 
-# ── Pré-filtrage AoN (rapide) pour ne garder que les K meilleurs ────────────
+# ── Pré-filtrage AoN (mode arc hérité uniquement) ────────────────────────────
 
 def _quick_aon_filter(
     network: UrbanNetwork,
@@ -304,12 +460,7 @@ def _quick_aon_filter(
     candidates: list[NewArcProposal],
     keep_top: int,
 ) -> list[NewArcProposal]:
-    """Estimation rapide : on évalue chaque candidat par All-or-Nothing.
-
-    On utilise AoN sur les temps libres avec l'arc ajouté : la baisse de VHT
-    AoN est un excellent proxy du gain UE (les chemins les plus directs
-    deviennent réellement plus directs grâce au nouvel arc).
-    """
+    """Pré-filtre par All-or-Nothing pour le mode arc (hérité)."""
     if len(candidates) <= keep_top:
         return candidates
 
@@ -327,7 +478,7 @@ def _quick_aon_filter(
     return [p for _, p in scored[:keep_top]]
 
 
-# ── Façade ──────────────────────────────────────────────────────────────────
+# ── Façade ────────────────────────────────────────────────────────────────────
 
 def propose_urban_plan(
     network: UrbanNetwork,
@@ -340,31 +491,28 @@ def propose_urban_plan(
     max_fw_evals: int = 15,
     fw_max_iter: int = 25,
     fw_tol: float = 5e-3,
-    building_index: BuildingIndex | None = None,
+    building_index: BuildingIndex | None = None,   # ignoré en mode corridor
 ) -> tuple[list[NewArcEvaluation], CityScore]:
-    """Pipeline complet de proposition de nouvelles routes.
-
-    Args:
-        building_index: index spatial des bâtiments OSM. Si fourni, les candidats
-            dont le tracé rectiligne traverse un bâtiment sont rejetés avant
-            toute évaluation Frank-Wolfe.
+    """Pipeline complet : génère des corridors à élargir, les évalue, sélectionne sous budget.
 
     Returns:
-        ``(plan, baseline_score)`` où ``plan`` est la liste ordonnée des
-        constructions retenues sous le budget.
+        ``(plan, baseline_score)`` — liste des élargissements retenus (BCR décroissant).
     """
     baseline_score = score_network(baseline_ue, profile)
     logger.info(f"Score baseline ({profile.name}) : {baseline_score.composite_score:,.0f} €/an")
 
-    raw = generate_new_arc_candidates(
-        network, od, max_candidates=max_proposals, building_index=building_index,
+    raw = generate_corridor_candidates(
+        network, od,
+        ue=baseline_ue,
+        max_candidates=max_proposals,
     )
     if not raw:
-        logger.warning("Aucun candidat de construction trouvé.")
+        logger.warning("Aucun corridor candidat trouvé.")
         return [], baseline_score
 
-    pre = _quick_aon_filter(network, od, raw, keep_top=max_fw_evals)
-    logger.info(f"NDP — {len(pre)} candidats sélectionnés pour évaluation FW")
+    # Le proxy score a déjà trié les candidats — on prend les top K directement.
+    pre = raw[:max_fw_evals]
+    logger.info(f"NDP corridors — {len(pre)} corridors sélectionnés pour évaluation FW")
 
     evals: list[NewArcEvaluation] = []
     for i, prop in enumerate(pre, start=1):
@@ -380,7 +528,6 @@ def propose_urban_plan(
             f"BCR={ev.bcr:>5.2f} payback={ev.payback_years:>5.1f}y"
         )
 
-    # Sélection gloutonne sous budget (par BCR décroissant, en €€ pondérés)
     evals_pos = [e for e in evals if e.is_worth_it]
     evals_pos.sort(key=lambda e: -e.bcr)
     chosen: list[NewArcEvaluation] = []
@@ -392,7 +539,7 @@ def propose_urban_plan(
         spent += ev.cost_eur
 
     logger.info(
-        f"NDP — {len(chosen)} constructions retenues, coût total = {spent:,.0f}€ "
+        f"NDP — {len(chosen)} élargissements retenus, coût total = {spent:,.0f}€ "
         f"(budget {budget_eur:,.0f}€)"
     )
     return chosen, baseline_score

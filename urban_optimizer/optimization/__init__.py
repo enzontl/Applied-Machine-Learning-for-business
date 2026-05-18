@@ -13,6 +13,7 @@ from .mayor_profile import (
 from .network_design import (
     NewArcEvaluation,
     NewArcProposal,
+    generate_corridor_candidates,
     generate_new_arc_candidates,
     propose_urban_plan,
 )
@@ -26,9 +27,10 @@ __all__ = [
     "CandidateEvaluation",
     "rank_candidates",
     "select_under_budget",
-    # Design réseau (brique 5b — nouveaux tracés)
+    # Design réseau (brique 5b — corridors à élargir)
     "NewArcProposal",
     "NewArcEvaluation",
+    "generate_corridor_candidates",
     "generate_new_arc_candidates",
     "propose_urban_plan",
     # Scoring et profils maire
