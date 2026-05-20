@@ -185,7 +185,7 @@ class TestProposeUrbanPlan:
         net = _detour_network()
         od = _od()
         ue = solve_user_equilibrium(net, od, max_iter=100, tol=1e-5)
-        plan, baseline = propose_urban_plan(
+        plan, baseline, joint = propose_urban_plan(
             net, od, EQUILIBRE, ue,
             budget_eur=50_000_000,
             max_proposals=20, max_fw_evals=5,
@@ -197,12 +197,15 @@ class TestProposeUrbanPlan:
         assert best.annual_benefit_eur > 0
         assert best.new_vht_h < best.baseline_vht_h
         assert baseline.total_annual_cost_eur > 0
+        # Re-éval jointe disponible avec au moins une intervention
+        assert joint is not None
+        assert joint.n_interventions == len(plan)
 
     def test_respects_budget(self):
         net = _detour_network()
         od = _od()
         ue = solve_user_equilibrium(net, od, max_iter=100, tol=1e-5)
-        plan, _ = propose_urban_plan(
+        plan, _, _ = propose_urban_plan(
             net, od, EQUILIBRE, ue,
             budget_eur=1_000_000,    # budget volontairement trop bas
             max_proposals=20, max_fw_evals=3,

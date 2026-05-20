@@ -107,12 +107,17 @@ def _frank_wolfe(
     max_iter: int,
     tol: float,
     method: str,
+    initial_flows: np.ndarray | None = None,
 ) -> AssignmentResult:
     g = network.graph
     t0, capacity, alpha, beta = _bpr_params(g)
 
-    # Initialisation : AoN sur temps libre
-    flows = assign_aon(g, od, weights=t0)
+    # Initialisation : warm-start si initial_flows fourni et compatible, sinon AoN free-flow
+    if initial_flows is not None and len(initial_flows) == g.ecount():
+        flows = np.asarray(initial_flows, dtype=float).copy()
+        logger.info(f"  warm-start depuis flows fournis ({len(flows)} arêtes)")
+    else:
+        flows = assign_aon(g, od, weights=t0.tolist())
     perceived = cost_fn(flows)
 
     converged = False
@@ -120,7 +125,10 @@ def _frank_wolfe(
     k = 0
 
     for k in range(1, max_iter + 1):
-        target = assign_aon(g, od, weights=perceived)
+        # On convertit perceived en list UNE seule fois par itération
+        # (au lieu d'une fois par appel AoN ; igraph est plus rapide avec list que np.array)
+        perceived_list = perceived.tolist()
+        target = assign_aon(g, od, weights=perceived_list)
         gap = _relative_gap(flows, target, perceived)
         if gap < tol:
             converged = True
@@ -159,15 +167,26 @@ def solve_user_equilibrium(
     od: ODMatrix,
     max_iter: int = FRANK_WOLFE_MAX_ITER,
     tol: float = FRANK_WOLFE_TOLERANCE,
+    *,
+    initial_flows: np.ndarray | None = None,
 ) -> AssignmentResult:
-    """User Equilibrium (Wardrop) par Frank-Wolfe sur le coût BPR moyen."""
+    """User Equilibrium (Wardrop) par Frank-Wolfe sur le coût BPR moyen.
+
+    Args:
+        initial_flows: si fourni et de taille g.ecount(), warm-start depuis ces
+            flux au lieu d'AoN free-flow. Utile pour ré-évaluer un plan perturbé
+            (gain typique : 2-3× moins d'itérations).
+    """
     t0, capacity, alpha, beta = _bpr_params(network.graph)
 
     def cost_fn(f: np.ndarray) -> np.ndarray:
         return bpr_time(f, t0, capacity, alpha, beta)
 
     logger.info(f"=== User Equilibrium (Frank-Wolfe, max_iter={max_iter}) ===")
-    return _frank_wolfe(network, od, cost_fn, max_iter=max_iter, tol=tol, method="ue")
+    return _frank_wolfe(
+        network, od, cost_fn, max_iter=max_iter, tol=tol, method="ue",
+        initial_flows=initial_flows,
+    )
 
 
 def solve_system_optimum(
@@ -175,6 +194,8 @@ def solve_system_optimum(
     od: ODMatrix,
     max_iter: int = FRANK_WOLFE_MAX_ITER,
     tol: float = FRANK_WOLFE_TOLERANCE,
+    *,
+    initial_flows: np.ndarray | None = None,
 ) -> AssignmentResult:
     """System Optimum par Frank-Wolfe sur le coût marginal."""
     t0, capacity, alpha, beta = _bpr_params(network.graph)
@@ -183,7 +204,10 @@ def solve_system_optimum(
         return bpr_marginal_time(f, t0, capacity, alpha, beta)
 
     logger.info(f"=== System Optimum (Frank-Wolfe, max_iter={max_iter}) ===")
-    return _frank_wolfe(network, od, cost_fn, max_iter=max_iter, tol=tol, method="so")
+    return _frank_wolfe(
+        network, od, cost_fn, max_iter=max_iter, tol=tol, method="so",
+        initial_flows=initial_flows,
+    )
 
 
 def solve_all_or_nothing(

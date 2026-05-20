@@ -11,6 +11,7 @@ from .mayor_profile import (
     MayorProfile,
 )
 from .network_design import (
+    JointPlanResult,
     NewArcEvaluation,
     NewArcProposal,
     generate_corridor_candidates,
@@ -19,7 +20,9 @@ from .network_design import (
     generate_upgrade_candidates,
     propose_urban_plan,
 )
+from .pareto import ParetoFrontier, ParetoPoint, compute_pareto_frontier
 from .ranking import CandidateEvaluation, rank_candidates, select_under_budget
+from .robustness import RobustnessPoint, RobustnessReport, evaluate_plan_robustness
 from .score import CityScore, score_network
 
 __all__ = [
@@ -32,6 +35,7 @@ __all__ = [
     # Design réseau (brique 5b — corridors à élargir)
     "NewArcProposal",
     "NewArcEvaluation",
+    "JointPlanResult",
     "generate_corridor_candidates",
     "generate_upgrade_candidates",
     "generate_new_route_candidates",
@@ -43,4 +47,12 @@ __all__ = [
     "ALL_PROFILES", "PROFILE_BY_NAME",
     "CityScore",
     "score_network",
+    # Robustesse
+    "RobustnessPoint",
+    "RobustnessReport",
+    "evaluate_plan_robustness",
+    # Courbe Pareto budget → bénéfice
+    "ParetoPoint",
+    "ParetoFrontier",
+    "compute_pareto_frontier",
 ]

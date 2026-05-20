@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python3)",
+      "Bash(find ~ -name \"python3*\" -path \"*venv*\" 2>/dev/null | head -5; find \"/Users/enzo/Desktop/B3/ML for business Project/Applied-Machine-Learning-for-business\" -name \"site-packages\" 2>/dev/null | head -3)",
+      "Read(//Users/enzo/**)",
+      "Bash(/opt/homebrew/bin/python3.12 -c \"import shapely; print\\('shapely OK'\\)\")",
+      "Bash(/opt/homebrew/bin/python3.13 -c \"import shapely; print\\('shapely OK'\\)\")",
+      "Bash(/Users/enzo/anaconda3/bin/python3 -c \"import shapely; print\\('anaconda shapely OK'\\)\")",
+      "Bash(/Users/enzo/anaconda3/bin/python3)",
+      "Bash(cd /tmp *)",
+      "Read(//private/tmp/**)",
+      "Bash(/Users/enzo/anaconda3/bin/python3 -c \"import urban_optimizer; print\\('OK import'\\)\")",
+      "Bash(/opt/anaconda3/bin/python -m pytest tests/test_assignment.py tests/test_network_design.py -q --no-header)",
+      "Bash(/opt/anaconda3/bin/python -m unittest discover -s tests -v)",
+      "Bash(/opt/anaconda3/bin/python -c ' *)",
+      "Bash(/opt/anaconda3/bin/python)"
+    ]
+  }
+}
