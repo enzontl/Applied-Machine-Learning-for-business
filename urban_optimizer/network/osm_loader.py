@@ -96,13 +96,27 @@ def _enrich_edges(edges):
     return edges
 
 
-def load_osm(city: str, network_type: str = "drive", simplify: bool = True):
+_SIMPLIFIED_HIGHWAY_TYPES = frozenset({
+    "motorway", "trunk", "primary", "secondary",
+    "motorway_link", "trunk_link", "primary_link", "secondary_link",
+})
+
+
+def load_osm(
+    city: str,
+    network_type: str = "drive",
+    simplify: bool = True,
+    highway_filter: frozenset[str] | None = None,
+):
     """Télécharge le réseau OSM pour *city* et renvoie (edges_gdf, nodes_gdf) en Lambert-93.
 
     Args:
         city: nom de la ville passé à OSMnx (ex. "Lyon, France").
         network_type: type de réseau OSM (default "drive").
         simplify: simplification topologique du graphe OSM.
+        highway_filter: si fourni, garde uniquement les arcs dont highway_clean
+            est dans cet ensemble (ex. _SIMPLIFIED_HIGHWAY_TYPES). Réduit
+            fortement la taille du graphe pour accélérer les calculs.
 
     Returns:
         Tuple (edges_gdf, nodes_gdf) reprojetés en EPSG:2154, avec colonnes enrichies.
@@ -117,5 +131,11 @@ def load_osm(city: str, network_type: str = "drive", simplify: bool = True):
     nodes = ox.graph_to_gdfs(G_proj, edges=False)
 
     edges = _enrich_edges(edges)
+
+    if highway_filter:
+        before = len(edges)
+        edges = edges[edges["highway_clean"].isin(highway_filter)]
+        logger.info(f"  Filtre highway — {before:,} → {len(edges):,} arcs")
+
     logger.info(f"  OSM enrichi — arcs: {len(edges):,}")
     return edges, nodes

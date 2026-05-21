@@ -1,15 +1,25 @@
 """Façade publique : build_network(city) fait tout le pipeline brique 1."""
 
+import hashlib
+import pickle
 from pathlib import Path
 
+from urban_optimizer.config import RAW_DIR
 from urban_optimizer.utils.logging import get_logger
 
 from .merger import build_unified_network
-from .osm_loader import load_osm
+from .osm_loader import _SIMPLIFIED_HIGHWAY_TYPES, load_osm
 from .route500_loader import filter_route500_outside_urban, load_route500
 from .urban_network import UrbanNetwork
 
 logger = get_logger(__name__)
+
+_CACHE_DIR = RAW_DIR / "network_cache"
+
+
+def _cache_key(city: str, include_route500: bool, simplified: bool) -> Path:
+    slug = hashlib.md5(f"{city}|{include_route500}|{simplified}".encode()).hexdigest()[:16]
+    return _CACHE_DIR / f"{slug}.pkl"
 
 
 def build_network(
@@ -19,6 +29,8 @@ def build_network(
     include_route500: bool = True,
     network_type: str = "drive",
     simplify: bool = True,
+    simplified_highway: bool = False,
+    use_disk_cache: bool = True,
 ) -> UrbanNetwork:
     """Pipeline complet de construction du réseau routier.
 
@@ -34,13 +46,26 @@ def build_network(
         include_route500: si False, seul OSM est utilisé (utile pour les tests).
         network_type: type de réseau OSM.
         simplify: simplification topologique OSM.
+        simplified_highway: si True, garde uniquement primary/secondary/trunk/motorway
+            (et leurs links). Réduit ~70 % des arcs → Dijkstra 3-4× plus rapide.
+        use_disk_cache: si True, sauvegarde/charge le réseau sur disque (pickle).
+            Évite de re-télécharger et re-traiter OSM à chaque redémarrage.
 
     Returns:
         UrbanNetwork prêt pour les briques suivantes.
     """
-    logger.info(f"=== Construction du réseau : {city} ===")
+    if use_disk_cache:
+        cp = _cache_key(city, include_route500, simplified_highway)
+        if cp.exists():
+            logger.info(f"Réseau chargé depuis cache disque : {cp.name}")
+            with open(cp, "rb") as f:
+                return pickle.load(f)
 
-    edges_osm, nodes_osm = load_osm(city, network_type=network_type, simplify=simplify)
+    logger.info(f"=== Construction du réseau : {city} ===")
+    hw_filter = _SIMPLIFIED_HIGHWAY_TYPES if simplified_highway else None
+    edges_osm, nodes_osm = load_osm(
+        city, network_type=network_type, simplify=simplify, highway_filter=hw_filter,
+    )
 
     r500_filtered = None
     if include_route500:
@@ -57,4 +82,11 @@ def build_network(
 
     net = build_unified_network(edges_osm, nodes_osm, r500_filtered)
     logger.info("=== Réseau construit ===")
+
+    if use_disk_cache:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(cp, "wb") as f:
+            pickle.dump(net, f)
+        logger.info(f"Réseau mis en cache disque : {cp.name}")
+
     return net

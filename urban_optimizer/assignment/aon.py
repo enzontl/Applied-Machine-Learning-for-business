@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import warnings
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import igraph as ig
 import numpy as np
 
 from urban_optimizer.demand.od_matrix import ODMatrix
+
+_AON_PARALLEL_THRESHOLD = 8  # nb minimum de sources pour activer les threads
 
 
 # Cache module-level : pour chaque OD, pré-calcule source → (targets_list, trips_list).
@@ -77,17 +80,28 @@ def assign_aon(
         # str (attribut) ou list déjà — on passe tel quel
         weights_arg = weights
 
-    # igraph émet un RuntimeWarning si certaines destinations sont injoignables.
-    # On l'ignore : la paire OD orpheline est simplement non chargée (epath vide).
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=RuntimeWarning, message="Couldn't reach")
-        for source, (targets, trips_list) in by_source.items():
+    n_sources = len(by_source)
+
+    def _dijkstra_source(item: tuple) -> np.ndarray:
+        source, (targets, trips_list) = item
+        local = np.zeros(graph.ecount(), dtype=float)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning, message="Couldn't reach")
             epaths = graph.get_shortest_paths(
-                source, to=targets, weights=weights_arg, mode="out", output="epath"
+                source, to=targets, weights=weights_arg, mode="out", output="epath",
             )
-            for epath, trips in zip(epaths, trips_list):
-                if not epath:
-                    continue
-                flows[epath] += trips
+        for epath, trips in zip(epaths, trips_list):
+            if epath:
+                local[epath] += trips
+        return local
+
+    if n_sources >= _AON_PARALLEL_THRESHOLD:
+        # igraph libère le GIL lors des calculs C → les threads s'exécutent vraiment en parallèle
+        with ThreadPoolExecutor(max_workers=min(n_sources, 8)) as pool:
+            for local in pool.map(_dijkstra_source, by_source.items()):
+                flows += local
+    else:
+        for item in by_source.items():
+            flows += _dijkstra_source(item)
 
     return flows

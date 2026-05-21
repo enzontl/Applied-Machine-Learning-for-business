@@ -1200,22 +1200,122 @@ def _evaluate_proposals(
     *,
     fw_max_iter: int,
     fw_tol: float,
+    n_jobs: int = -1,
 ) -> list[NewArcEvaluation]:
-    """Évalue chaque proposition individuellement (1 FW par candidat)."""
-    evals: list[NewArcEvaluation] = []
-    for i, prop in enumerate(proposals, start=1):
-        ev = _evaluate(
+    """Évalue chaque proposition individuellement (1 FW par candidat).
+
+    Args:
+        n_jobs: nombre de workers pour parallélisation (joblib loky).
+            -1 = tous les cœurs disponibles (défaut). 1 = séquentiel.
+            La parallélisation est désactivée si len(proposals) < 2 (overhead inutile).
+    """
+    if not proposals:
+        return []
+
+    import time
+    t0 = time.time()
+
+    use_parallel = n_jobs != 1 and len(proposals) >= 2
+    if not use_parallel:
+        evals: list[NewArcEvaluation] = []
+        for i, prop in enumerate(proposals, start=1):
+            ev = _evaluate(
+                network, od, prop, baseline_ue, baseline_score, profile,
+                max_iter=fw_max_iter, tol=fw_tol,
+            )
+            evals.append(ev)
+            logger.info(
+                f"  [{i:>2}/{len(proposals)}] {prop.highway:>9s} {prop.length_m:>5.0f}m "
+                f"u={prop.u_node} v={prop.v_node} "
+                f"ΔVHT={ev.delta_vht_h:>+7.1f}h benef={ev.annual_benefit_eur:>+12,.0f}€/an "
+                f"BCR={ev.bcr:>5.2f} payback={ev.payback_years:>5.1f}y"
+            )
+        logger.info(f"  Évaluation séquentielle terminée en {time.time()-t0:.1f}s")
+        return evals
+
+    # Parallèle — joblib loky (process-based, isolation automatique du graphe)
+    from joblib import Parallel, delayed
+    logger.info(f"  Évaluation parallèle de {len(proposals)} candidats (n_jobs={n_jobs})")
+    evals = list(Parallel(n_jobs=n_jobs, backend="loky", verbose=0)(
+        delayed(_evaluate)(
             network, od, prop, baseline_ue, baseline_score, profile,
             max_iter=fw_max_iter, tol=fw_tol,
         )
-        evals.append(ev)
+        for prop in proposals
+    ))
+    for i, (prop, ev) in enumerate(zip(proposals, evals), start=1):
         logger.info(
             f"  [{i:>2}/{len(proposals)}] {prop.highway:>9s} {prop.length_m:>5.0f}m "
             f"u={prop.u_node} v={prop.v_node} "
             f"ΔVHT={ev.delta_vht_h:>+7.1f}h benef={ev.annual_benefit_eur:>+12,.0f}€/an "
             f"BCR={ev.bcr:>5.2f} payback={ev.payback_years:>5.1f}y"
         )
+    logger.info(f"  Évaluation parallèle terminée en {time.time()-t0:.1f}s")
     return evals
+
+
+def _quick_fw_screen(
+    network: UrbanNetwork,
+    od: ODMatrix,
+    baseline_ue: AssignmentResult,
+    candidates: list[NewArcProposal],
+    keep_top: int,
+    *,
+    n_jobs: int = -1,
+) -> list[NewArcProposal]:
+    """Pré-filtre rapide : 1 itération FW par candidat avec warm-start.
+
+    Pour chaque candidat, on applique le contexte (capacité ×2 ou nouveau arc),
+    puis on lance 1 seule itération FW (= 1 AoN + 1 line search) en partant des
+    flux baseline. Le VHT obtenu après 1 itération est un excellent proxy du
+    bénéfice complet — il capture déjà l'essentiel du gain pour la majorité
+    des candidats, à ~1/10 du coût d'un FW complet.
+
+    Args:
+        keep_top: nombre de candidats à conserver (les meilleurs par ΔVHT 1-iter).
+        n_jobs: workers joblib (défaut -1 = tous cœurs). Mêmes règles que
+            ``_evaluate_proposals``.
+
+    Returns:
+        Sous-ensemble de ``candidates`` (au plus ``keep_top`` éléments), trié
+        par ΔVHT décroissant.
+    """
+    if not candidates or len(candidates) <= keep_top:
+        return candidates
+
+    import time
+    t0 = time.time()
+    base_vht = baseline_ue.vht
+
+    def _vht_after_1iter(p: NewArcProposal) -> float:
+        g = network.graph
+        ctx = _CorridorContext(g, p) if p.is_corridor else _NewArcContext(g, p)
+        with ctx:
+            warm = _warm_start_flows(baseline_ue.flows, g.ecount())
+            # tol=0.0 force l'exécution d'1 vraie itération (jamais "convergé")
+            ue1 = solve_user_equilibrium(
+                network, od, max_iter=1, tol=0.0, initial_flows=warm,
+            )
+        return ue1.vht
+
+    use_parallel = n_jobs != 1 and len(candidates) >= 2
+    if use_parallel:
+        from joblib import Parallel, delayed
+        vhts = list(Parallel(n_jobs=n_jobs, backend="loky", verbose=0)(
+            delayed(_vht_after_1iter)(p) for p in candidates
+        ))
+    else:
+        vhts = [_vht_after_1iter(p) for p in candidates]
+
+    # ΔVHT positif = bon candidat ; on garde les keep_top meilleurs
+    scored = sorted(zip(vhts, candidates), key=lambda kv: kv[0])
+    kept = [p for _, p in scored[:keep_top]]
+    logger.info(
+        f"  Screen 1-iter FW : {len(candidates)} → {keep_top} en {time.time()-t0:.1f}s "
+        f"(ΔVHT top retenu = {base_vht - scored[0][0]:+.1f}h, "
+        f"ΔVHT seuil = {base_vht - scored[keep_top-1][0]:+.1f}h)"
+    )
+    return kept
 
 
 def _greedy_select(
@@ -1303,8 +1403,12 @@ def propose_urban_plan(
     budget_eur: float = 50_000_000.0,
     max_proposals: int = 60,
     max_fw_evals: int = 15,
-    fw_max_iter: int = 25,
-    fw_tol: float = 5e-3,
+    fw_max_iter: int = 25,                          # FW JOINT (re-éval finale, stricte)
+    fw_tol: float = 5e-3,                           # FW JOINT
+    fw_max_iter_cand: int = 10,                     # FW par candidat (relâché)
+    fw_tol_cand: float = 5e-2,                      # FW par candidat (relâché)
+    n_jobs: int = -1,                               # workers joblib (-1 = tous cœurs)
+    screen_factor: float = 2.0,                    # pool initial = screen_factor × max_fw_evals
     building_index: ObstacleIndex | None = None,    # rétrocompat (= obstacle_index)
     obstacle_index: ObstacleIndex | None = None,    # obstacles durs (bâtiments, parcs)
     soft_index: ObstacleIndex | None = None,        # ponts (voies ferrées, eau)
@@ -1320,6 +1424,15 @@ def propose_urban_plan(
        traversée de voie ferrée ou cours d'eau.
 
     Split FW : ~50 % corridors, ~25 % mises à niveau, ~25 % nouvelles routes.
+
+    Optimisations performance :
+    - **Tolérance adaptative** : FW par candidat relâché (``fw_*_cand``), strict
+      pour le FW joint final (``fw_*``).
+    - **Parallélisme** : ``n_jobs=-1`` utilise tous les cœurs pour les FW candidats
+      indépendants (joblib loky).
+    - **Pré-filtre 1-iter FW** : si ``screen_factor > 1``, on génère
+      ``screen_factor × max_fw_evals`` candidats puis on garde les meilleurs via
+      1 itération FW chacun (~10× moins cher qu'un FW complet).
     """
     _obs = obstacle_index or building_index
 
@@ -1333,10 +1446,11 @@ def propose_urban_plan(
         f"(accès moyen = {baseline_access.mean_reachable:.1f} zones, Gini = {baseline_access.gini:.2f})"
     )
 
-    # 1. Génération de candidats
+    # 1. Génération de candidats — pool plus large si screening activé
+    pool_size = max_fw_evals if screen_factor <= 1.0 else int(max_fw_evals * screen_factor)
     pre = _generate_proposals(
         network, od, baseline_ue,
-        max_proposals=max_proposals, max_fw_evals=max_fw_evals,
+        max_proposals=max_proposals, max_fw_evals=pool_size,
         obstacle_index=_obs, soft_index=soft_index,
         periphery_margin_m=periphery_margin_m,
     )
@@ -1346,15 +1460,22 @@ def propose_urban_plan(
     counts = {t: sum(p.proposal_type == t for p in pre)
               for t in ("corridor", "upgrade", "new_route")}
     logger.info(
-        f"NDP — {len(pre)} candidats pour FW : "
+        f"NDP — {len(pre)} candidats générés (pool screening) : "
         f"{counts['corridor']} corridors + {counts['upgrade']} mises à niveau + "
         f"{counts['new_route']} nouvelles routes"
     )
 
-    # 2. Évaluation individuelle (FW par candidat)
+    # 1b. Pré-filtre 1-iter FW (réduit le pool aux max_fw_evals meilleurs)
+    if len(pre) > max_fw_evals:
+        pre = _quick_fw_screen(
+            network, od, baseline_ue, pre, max_fw_evals, n_jobs=n_jobs,
+        )
+
+    # 2. Évaluation individuelle (FW par candidat, relâché, parallélisé)
     evals = _evaluate_proposals(
         network, od, profile, baseline_ue, baseline_score, pre,
-        fw_max_iter=fw_max_iter, fw_tol=fw_tol,
+        fw_max_iter=fw_max_iter_cand, fw_tol=fw_tol_cand,
+        n_jobs=n_jobs,
     )
 
     # 3. Sélection gloutonne sous budget
@@ -1367,7 +1488,7 @@ def propose_urban_plan(
         f"{cnt['new_route']} nouvelles routes), coût = {spent:,.0f}€ / {budget_eur:,.0f}€"
     )
 
-    # 4. Re-évaluation JOINTE (FW unique avec tout appliqué)
+    # 4. Re-évaluation JOINTE (FW unique avec tout appliqué, tolérance STRICTE)
     joint = _joint_re_evaluate(
         network, od, profile, baseline_ue, baseline_score,
         baseline_access.mean_reachable, baseline_access.gini,

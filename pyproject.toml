@@ -28,6 +28,7 @@ dependencies = [
     "pandas>=2.1",
     "scipy>=1.11",
     "numba>=0.59",         # JIT sur les boucles critiques
+    "joblib>=1.3",         # parallélisation des évaluations FW
 
     # --- Visualisation ---
     "folium>=0.15",

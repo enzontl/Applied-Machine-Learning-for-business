@@ -30,6 +30,7 @@ from .network_design import (
     _generate_proposals,
     _greedy_select,
     _joint_re_evaluate,
+    _quick_fw_screen,
 )
 from .score import score_network
 
@@ -81,8 +82,12 @@ def compute_pareto_frontier(
     ),
     max_proposals: int = 60,
     max_fw_evals: int = 15,
-    fw_max_iter: int = 25,
-    fw_tol: float = 5e-3,
+    fw_max_iter: int = 25,                  # FW JOINT (par budget, strict)
+    fw_tol: float = 5e-3,                   # FW JOINT
+    fw_max_iter_cand: int = 10,             # FW par candidat (relâché)
+    fw_tol_cand: float = 5e-2,              # FW par candidat (relâché)
+    n_jobs: int = -1,                       # workers joblib (-1 = tous cœurs)
+    screen_factor: float = 2.0,             # pool initial = screen_factor × max_fw_evals
     obstacle_index: ObstacleIndex | None = None,
     soft_index: ObstacleIndex | None = None,
     periphery_margin_m: float = 600.0,
@@ -102,10 +107,11 @@ def compute_pareto_frontier(
     )
     baseline_score = score_network(baseline_ue, profile, access=baseline_access)
 
-    # 2. Candidats — un seul appel pour toute la courbe
+    # 2. Candidats — pool plus large pour screening, puis un seul appel d'éval pour toute la courbe
+    pool_size = max_fw_evals if screen_factor <= 1.0 else int(max_fw_evals * screen_factor)
     pre = _generate_proposals(
         network, od, baseline_ue,
-        max_proposals=max_proposals, max_fw_evals=max_fw_evals,
+        max_proposals=max_proposals, max_fw_evals=pool_size,
         obstacle_index=obstacle_index, soft_index=soft_index,
         periphery_margin_m=periphery_margin_m,
     )
@@ -113,10 +119,17 @@ def compute_pareto_frontier(
         logger.warning("Pareto : aucun candidat — courbe vide.")
         return ParetoFrontier()
 
+    # 2b. Pré-filtre 1-iter FW (réduit aux max_fw_evals meilleurs)
+    if len(pre) > max_fw_evals:
+        pre = _quick_fw_screen(
+            network, od, baseline_ue, pre, max_fw_evals, n_jobs=n_jobs,
+        )
+
     # 3. Évaluation individuelle — UNE SEULE FOIS (réutilisée pour tous les budgets)
     evals = _evaluate_proposals(
         network, od, profile, baseline_ue, baseline_score, pre,
-        fw_max_iter=fw_max_iter, fw_tol=fw_tol,
+        fw_max_iter=fw_max_iter_cand, fw_tol=fw_tol_cand,
+        n_jobs=n_jobs,
     )
 
     # 4. Pour chaque budget : greedy + joint

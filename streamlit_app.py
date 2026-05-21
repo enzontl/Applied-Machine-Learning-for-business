@@ -52,8 +52,11 @@ st.set_page_config(page_title="Urban Optimizer", layout="wide", page_icon="🛣�
 # ────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
-def cached_network(city: str, include_route500: bool):
-    return build_network(city, include_route500=include_route500)
+def cached_network(city: str, include_route500: bool, simplified_highway: bool = False):
+    return build_network(
+        city, include_route500=include_route500,
+        simplified_highway=simplified_highway, use_disk_cache=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -67,8 +70,9 @@ def cached_bridge_triggers(city: str):
 
 
 @st.cache_data(show_spinner=False)
-def cached_od(city: str, hour: int, n_cells: int, scale_factor: float, include_route500: bool):
-    net = cached_network(city, include_route500)
+def cached_od(city: str, hour: int, n_cells: int, scale_factor: float,
+              include_route500: bool, simplified_highway: bool):
+    net = cached_network(city, include_route500, simplified_highway)
     return generate_od_matrix(
         net, hour=hour, method="grid", n_cells=n_cells, scale_factor=scale_factor,
     )
@@ -76,20 +80,20 @@ def cached_od(city: str, hour: int, n_cells: int, scale_factor: float, include_r
 
 @st.cache_data(show_spinner=False)
 def cached_ue(city: str, hour: int, n_cells: int, scale_factor: float,
-              include_route500: bool, max_iter: int):
-    net = cached_network(city, include_route500)
-    od = cached_od(city, hour, n_cells, scale_factor, include_route500)
+              include_route500: bool, simplified_highway: bool, max_iter: int):
+    net = cached_network(city, include_route500, simplified_highway)
+    od = cached_od(city, hour, n_cells, scale_factor, include_route500, simplified_highway)
     return solve_user_equilibrium(net, od, max_iter=max_iter, tol=1e-4)
 
 
 @st.cache_resource(show_spinner=False)
-def cached_edges_wgs_and_coords(city: str, include_route500: bool):
+def cached_edges_wgs_and_coords(city: str, include_route500: bool, simplified_highway: bool):
     """Pré-calcule edges_gdf en WGS84 + liste de coords [(lat, lon), ...] par arc.
 
     Évite (1) la reprojection CRS Lambert→WGS84 à chaque run streamlit,
     (2) le pandas .iloc[] dans la boucle de rendu des cartes.
     """
-    net = cached_network(city, include_route500)
+    net = cached_network(city, include_route500, simplified_highway)
     edges_wgs = net.edges_gdf.to_crs(CRS_WGS84)
     coords_per_edge: list = []
     for geom in edges_wgs.geometry:
@@ -111,6 +115,12 @@ st.sidebar.markdown("### Ville")
 city = st.sidebar.text_input("Place OSM", value="Villeurbanne, France")
 include_route500 = st.sidebar.checkbox(
     "Inclure ROUTE500 (interurbain, requiert data/raw)", value=False,
+)
+simplified_highway = st.sidebar.checkbox(
+    "Réseau simplifié (primary/secondary uniquement)",
+    value=False,
+    help="Garde uniquement les axes primary, secondary, trunk et motorway (~30 % des arcs). "
+         "Dijkstra 3-4× plus rapide. Peut manquer des rues locales dans l'OD.",
 )
 
 st.sidebar.markdown("### Profil du décideur")
@@ -190,11 +200,11 @@ if run_btn or st.session_state.get("ran_once"):
     st.session_state["ran_once"] = True
 
     with st.spinner(f"Construction du réseau « {city} »…"):
-        net = cached_network(city, include_route500)
+        net = cached_network(city, include_route500, simplified_highway)
     with st.spinner("Génération de la matrice OD gravitaire…"):
-        od = cached_od(city, hour, n_cells, scale_factor, include_route500)
+        od = cached_od(city, hour, n_cells, scale_factor, include_route500, simplified_highway)
     with st.spinner(f"Affectation Frank-Wolfe ({max_iter} itérations)…"):
-        ue = cached_ue(city, hour, n_cells, scale_factor, include_route500, max_iter)
+        ue = cached_ue(city, hour, n_cells, scale_factor, include_route500, simplified_highway, max_iter)
 
     baseline_access = compute_accessibility(
         net, od, ue, threshold_seconds=float(access_threshold_min) * 60.0,
@@ -518,7 +528,7 @@ if run_btn or st.session_state.get("ran_once"):
 
     # ── Carte avant/après ─────────────────────────────────────────────────
     st.markdown("### Carte du plan urbain")
-    edges_wgs, edges_coords = cached_edges_wgs_and_coords(city, include_route500)
+    edges_wgs, edges_coords = cached_edges_wgs_and_coords(city, include_route500, simplified_highway)
 
     capacity = np.asarray(net.graph.es["capacity"], dtype=float)
     sat_before = ue.flows / np.maximum(capacity, 1.0)

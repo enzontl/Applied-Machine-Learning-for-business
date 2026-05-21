@@ -103,6 +103,12 @@ def _attractor_weights(
     res = edges[edges["highway"].isin(RESIDENTIAL_HIGHWAYS)]
     attr = edges[edges["highway"].isin(ATTRACTOR_HIGHWAYS)]
 
+    # Fallback : si le réseau est filtré (simplified_highway), les routes résidentielles
+    # n'existent plus. On utilise alors tous les arcs comme proxy unique.
+    if len(res) == 0 and len(attr) > 0:
+        res = attr
+        logger.info("Pas de routes résidentielles (réseau simplifié) — fallback sur tous les arcs.")
+
     pop = np.zeros(len(zones_gdf), dtype=float)
     jobs = np.zeros(len(zones_gdf), dtype=float)
 
