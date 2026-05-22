@@ -1201,6 +1201,7 @@ def _evaluate_proposals(
     fw_max_iter: int,
     fw_tol: float,
     n_jobs: int = -1,
+    progress_callback=None,
 ) -> list[NewArcEvaluation]:
     """Évalue chaque proposition individuellement (1 FW par candidat).
 
@@ -1208,6 +1209,9 @@ def _evaluate_proposals(
         n_jobs: nombre de workers pour parallélisation (joblib loky).
             -1 = tous les cœurs disponibles (défaut). 1 = séquentiel.
             La parallélisation est désactivée si len(proposals) < 2 (overhead inutile).
+        progress_callback: callable(done: int, total: int) → None, appelé après
+            chaque candidat évalué. Force le mode séquentiel (sinon joblib bloque
+            jusqu'à la fin du batch et le callback ne sert à rien).
     """
     if not proposals:
         return []
@@ -1215,7 +1219,9 @@ def _evaluate_proposals(
     import time
     t0 = time.time()
 
-    use_parallel = n_jobs != 1 and len(proposals) >= 2
+    # Si un callback de progression est fourni, on force le mode séquentiel pour
+    # pouvoir le notifier candidat par candidat.
+    use_parallel = n_jobs != 1 and len(proposals) >= 2 and progress_callback is None
     if not use_parallel:
         evals: list[NewArcEvaluation] = []
         for i, prop in enumerate(proposals, start=1):
@@ -1230,6 +1236,11 @@ def _evaluate_proposals(
                 f"ΔVHT={ev.delta_vht_h:>+7.1f}h benef={ev.annual_benefit_eur:>+12,.0f}€/an "
                 f"BCR={ev.bcr:>5.2f} payback={ev.payback_years:>5.1f}y"
             )
+            if progress_callback is not None:
+                try:
+                    progress_callback(i, len(proposals))
+                except Exception:
+                    pass  # ne jamais laisser un callback casser l'évaluation
         logger.info(f"  Évaluation séquentielle terminée en {time.time()-t0:.1f}s")
         return evals
 

@@ -15,7 +15,12 @@
       "Bash(/opt/anaconda3/bin/python -m pytest tests/test_assignment.py tests/test_network_design.py -q --no-header)",
       "Bash(/opt/anaconda3/bin/python -m unittest discover -s tests -v)",
       "Bash(/opt/anaconda3/bin/python -c ' *)",
-      "Bash(/opt/anaconda3/bin/python)"
+      "Bash(/opt/anaconda3/bin/python)",
+      "Bash(curl -s http://127.0.0.1:8765/api/health)",
+      "Bash(curl -s -X POST http://127.0.0.1:8765/api/jobs -H 'Content-Type: application/json' -d '{\"city\":\"Villeurbanne, France\",\"profile\":\"equilibre\",\"hour\":8,\"n_cells\":6,\"scale_factor\":0.2,\"budget_meur\":30,\"max_candidates\":15,\"max_fw_evals\":5,\"periphery_margin_m\":600,\"access_threshold_min\":15,\"include_route500\":false,\"multi_profile\":false}')",
+      "Bash(/opt/anaconda3/bin/uvicorn api.main:app --port 8765 --host 127.0.0.1 --log-level warning)",
+      "Bash(curl -s -X POST http://127.0.0.1:8765/api/jobs -H 'Content-Type: application/json' -d '{\"city\":\"Villeurbanne, France\",\"profile\":\"equilibre\",\"hour\":8,\"n_cells\":6,\"scale_factor\":0.3,\"budget_meur\":50,\"max_candidates\":15,\"max_fw_evals\":6,\"periphery_margin_m\":600,\"access_threshold_min\":15,\"include_route500\":false,\"multi_profile\":false,\"include_robustness\":true,\"include_pareto\":true}')",
+      "Bash(curl -s -X POST http://127.0.0.1:8765/api/jobs -H 'Content-Type: application/json' -d '{\"city\":\"Villeurbanne, France\",\"profile\":\"equilibre\",\"hour\":8,\"n_cells\":6,\"scale_factor\":0.3,\"budget_meur\":50,\"max_candidates\":15,\"max_fw_evals\":5,\"periphery_margin_m\":600,\"access_threshold_min\":15,\"max_iter_ue\":50,\"include_route500\":false,\"simplified_highway\":false,\"multi_profile\":false,\"include_robustness\":false,\"include_pareto\":false,\"include_braess\":true}')"
     ]
   }
 }
