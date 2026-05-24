@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Urban Optimizer — Re-pensez votre ville en quelques minutes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">▲</span>
+    <span>Urban Optimizer</span>
+  </div>
+  <nav class="nav">
+    <a href="#launch">Démo</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="https://github.com/anthropics" target="_blank" rel="noopener noreferrer">GitHub</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <span class="eyebrow"><span class="dot"></span>Outil d'aide à la décision urbaine</span>
+  <h1>
+    Et si <span class="highlight">votre ville</span> roulait<br>
+    20% mieux dès demain&nbsp;?
+  </h1>
+  <p class="sub">
+    Notre moteur scanne le réseau routier de votre commune, simule des millions
+    de trajets à l'heure de pointe, et trouve <strong>le meilleur plan d'aménagement</strong>
+    sous budget — élargissements, mises à niveau, nouvelles routes. Quatre profils
+    de maire, des dizaines de scénarios, une seule certitude&nbsp;: aucun choix idéologique
+    n'est laissé au hasard.
+  </p>
+
+  <div class="hero-stats">
+    <div class="stat">
+      <div class="num primary"><span class="count-up" data-target="6">0</span></div>
+      <div class="label">villes pré-configurées</div>
+    </div>
+    <div class="stat">
+      <div class="num secondary"><span class="count-up" data-target="4">0</span></div>
+      <div class="label">profils de décideur</div>
+    </div>
+    <div class="stat">
+      <div class="num good"><span class="count-up" data-target="3">0</span><span style="font-size: 26px;">&nbsp;types</span></div>
+      <div class="label">d'interventions modélisées</div>
+    </div>
+    <div class="stat">
+      <div class="num primary">~<span class="count-up" data-target="40">0</span><span style="font-size: 26px;">s</span></div>
+      <div class="label">pour un plan complet</div>
+    </div>
+  </div>
+</section>
+
+<section class="launch" id="launch">
+  <div class="launch-card">
+    <h2>Lancez une simulation</h2>
+    <p class="h-sub">Choisissez une ville, ajustez le budget, sélectionnez un profil de décideur.</p>
+
+    <h3 style="font-family: var(--font-display); font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 24px 0 12px;">1. Ville</h3>
+    <div class="cities-grid" id="cities-grid"></div>
+
+    <h3 style="font-family: var(--font-display); font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 24px 0 12px;">2. Profil du décideur</h3>
+    <div class="profile-pills" id="profile-pills"></div>
+
+    <h3 style="font-family: var(--font-display); font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 24px 0 12px;">3. Paramètres</h3>
+    <div class="params">
+      <div class="param">
+        <label for="p-budget">Budget construction <span class="value" id="v-budget">50 M€</span></label>
+        <input type="range" id="p-budget" title="Budget construction (M€)" min="5" max="500" step="5" value="50">
+      </div>
+      <div class="param">
+        <label for="p-hour">Heure de pointe <span class="value" id="v-hour">8 h</span></label>
+        <input type="range" id="p-hour" title="Heure de pointe" min="0" max="23" step="1" value="8">
+      </div>
+      <div class="param">
+        <label for="p-cells">Zonage demande <span class="value" id="v-cells">10 cellules</span></label>
+        <input type="range" id="p-cells" title="Nombre de cellules de zonage" min="4" max="20" step="1" value="10">
+      </div>
+      <div class="param">
+        <label for="p-scale">Intensité demande <span class="value" id="v-scale">0.3×</span></label>
+        <input type="range" id="p-scale" title="Échelle de demande" min="1" max="20" step="1" value="3">
+      </div>
+      <div class="param">
+        <label for="p-fw">Candidats évalués <span class="value" id="v-fw">10 FW</span></label>
+        <input type="range" id="p-fw" title="Nombre de candidats évalués via Frank-Wolfe" min="5" max="25" step="1" value="10">
+      </div>
+      <div class="param">
+        <label for="p-cand">Candidats générés <span class="value" id="v-cand">30</span></label>
+        <input type="range" id="p-cand" title="Nombre de candidats générés (proxy-rank)" min="10" max="100" step="5" value="30">
+      </div>
+      <div class="param">
+        <label for="p-periph">Périphérie nouv. routes <span class="value" id="v-periph">600 m</span></label>
+        <input type="range" id="p-periph" title="Marge périphérie pour les nouvelles routes" min="0" max="2000" step="100" value="600">
+      </div>
+      <div class="param">
+        <label for="p-access">Seuil isochrone <span class="value" id="v-access">15 min</span></label>
+        <input type="range" id="p-access" title="Seuil de temps pour le calcul d'accessibilité" min="5" max="45" step="5" value="15">
+      </div>
+      <div class="param">
+        <label for="p-ueiter">Itérations UE <span class="value" id="v-ueiter">100</span></label>
+        <input type="range" id="p-ueiter" title="Itérations max Frank-Wolfe baseline" min="30" max="300" step="10" value="100">
+      </div>
+    </div>
+
+    <div class="toggle-row" id="toggle-simplified">
+      <div class="toggle"></div>
+      <div>
+        <div class="toggle-label">Réseau simplifié (gros axes uniquement)</div>
+        <div class="toggle-help">Garde primary/secondary/trunk/motorway (~30 % des arcs). Dijkstra 3-4× plus rapide, idéal pour Lyon ou ville &gt; 200k hab.</div>
+      </div>
+    </div>
+
+    <div class="toggle-row" id="toggle-route500">
+      <div class="toggle"></div>
+      <div>
+        <div class="toggle-label">Inclure ROUTE500 (interurbain)</div>
+        <div class="toggle-help">Ajoute le réseau interurbain IGN ROUTE500 — nécessite les fichiers source dans data/raw.</div>
+      </div>
+    </div>
+
+    <div class="toggle-row" id="toggle-multi">
+      <div class="toggle"></div>
+      <div>
+        <div class="toggle-label">Comparer les 4 profils maire</div>
+        <div class="toggle-help">Génère un tableau comparatif — coût en temps multiplié par ~4×.</div>
+      </div>
+    </div>
+
+    <div class="toggle-row" id="toggle-robustness">
+      <div class="toggle"></div>
+      <div>
+        <div class="toggle-label">Test de robustesse</div>
+        <div class="toggle-help">Re-évalue le plan sous demande ×0.8 / ×1.0 / ×1.2 / ×1.5 — vérifie qu'il reste bénéfique sous variation démographique. +8 FW.</div>
+      </div>
+    </div>
+
+    <div class="toggle-row" id="toggle-pareto">
+      <div class="toggle"></div>
+      <div>
+        <div class="toggle-label">Courbe Pareto budget → bénéfice</div>
+        <div class="toggle-help">Évalue 6 niveaux de budget (5 / 15 / 30 / 60 / 120 / 250 M€) et identifie le sweet spot des rendements décroissants. +6 FW.</div>
+      </div>
+    </div>
+
+    <div class="toggle-row" id="toggle-braess">
+      <div class="toggle"></div>
+      <div>
+        <div class="toggle-label">Suggestions Braess (arcs à supprimer)</div>
+        <div class="toggle-help">Identifie les arcs dont la SUPPRESSION améliorerait le réseau (paradoxe de Braess). +1-2 min de calcul.</div>
+      </div>
+    </div>
+
+    <button class="cta" id="btn-run" type="button">
+      Lancer l'optimisation
+      <span class="arrow">→</span>
+    </button>
+  </div>
+</section>
+
+<!-- Loader overlay -->
+<div class="loader" id="loader">
+  <div class="wrap">
+    <p class="label">Optimisation en cours…</p>
+    <p class="step" id="loader-step">Initialisation…</p>
+    <div class="bar"><div class="fill" id="loader-fill"></div></div>
+    <p class="progress-text"><span id="loader-pct">0</span>% — <span id="loader-elapsed">0</span>s</p>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
+<script>
+  // Init landing-specific
+  window.addEventListener("DOMContentLoaded", () => {
+    initLandingPage();
+  });
+</script>
+</body>
+</html>

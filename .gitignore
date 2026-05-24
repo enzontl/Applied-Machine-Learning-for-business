@@ -68,5 +68,5 @@ configs/secrets.yaml
 # --- Outputs ---
 outputs/
 results/
-*.html
+
 !notebooks/*.html

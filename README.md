@@ -8,7 +8,8 @@ The project combines:
 3. Traffic assignment (All-or-Nothing, User Equilibrium, System Optimum).
 4. Network diagnostics (VHT, congestion, saturation, critical links, **accessibility + Gini equity**, price of anarchy).
 5. Optimization (candidate ranking, new link proposals under budget constraints, **joint re-evaluation**, **robustness testing**, **Pareto frontier**).
-6. A Streamlit dashboard to run the full pipeline end-to-end with **before/after saturation maps**.
+6. **A modern web app** (FastAPI + HTML/JS data-viz front) to run the full pipeline end-to-end with **before/after saturation maps**, multi-profile comparison, Pareto curve, robustness test and Braess removals.
+7. A legacy Streamlit dashboard (still available but deprecated in favor of the new front).
 
 ---
 
@@ -27,7 +28,8 @@ Features currently implemented:
   - **Enriched score**: time + fuel + CO2 + accessibility benefit − equity (Gini) penalty, weighted by mayor profile.
   - **Robustness testing**: re-FW under demand × {0.8, 1.0, 1.2, 1.5}.
   - **Pareto frontier**: budget → benefit curve across 6 budget levels with sweet-spot detection.
-- **streamlit_app.py**: interactive dashboard with before/after maps, KPIs, optional robustness + Pareto.
+- **api/ + frontend/**: FastAPI backend + HTML/JS frontend (data-viz pop style) — landing page with city/profile picker, dashboard with KPI cards, Leaflet map (saturation + plan overlay + Braess), Pareto chart (Chart.js), robustness verdict, multi-profile comparison table.
+- **streamlit_app.py**: legacy interactive dashboard with before/after maps, KPIs, optional robustness + Pareto.
 
 ---
 
@@ -62,7 +64,18 @@ OSM/ROUTE500 → network → OD matrix → Frank-Wolfe UE → diagnosis (VHT + a
 
 ```
 .
-├── streamlit_app.py
+├── api/                     # FastAPI backend (new web app)
+│   ├── main.py              # app + REST endpoints + static frontend serving
+│   ├── pipeline.py          # async orchestrator + GeoJSON serialization
+│   ├── models.py            # Pydantic schemas
+│   └── jobs.py              # in-memory thread-safe job registry
+├── frontend/                # HTML/CSS/JS frontend (no framework)
+│   ├── index.html           # landing page (city/profile picker + sliders/toggles)
+│   ├── dashboard.html       # results view (KPIs + Leaflet map + analyses)
+│   └── assets/
+│       ├── style.css        # design system (Space Grotesk / Inter / JetBrains Mono)
+│       └── app.js           # logic (vanilla JS, fetch API, Leaflet, Chart.js)
+├── streamlit_app.py         # legacy dashboard (deprecated)
 ├── configs/
 ├── data/
 │   ├── raw/
@@ -95,6 +108,7 @@ OSM/ROUTE500 → network → OD matrix → Frank-Wolfe UE → diagnosis (VHT + a
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+pip install "fastapi" "uvicorn[standard]"   # for the new web app
 ```
 
 Quick check:
@@ -105,7 +119,38 @@ python -c "import urban_optimizer; print(urban_optimizer.__version__)"
 
 ---
 
-## Run the Dashboard
+## Run the Web App (recommended)
+
+```bash
+source .venv/bin/activate
+uvicorn api.main:app --reload --port 8000
+```
+
+Then open **<http://localhost:8000>**.
+
+The web app lets you:
+- Pick a city among 6 preset ones (Villeurbanne, Lyon, Lille, Bordeaux, Nantes, Rennes), pick a mayor profile (Équilibré / Écolo / Mobilité / Économique).
+- Tune all parameters via sliders: budget, peak hour, zoning cells, demand intensity, FW candidates, periphery margin, isochrone threshold, UE iterations.
+- Toggle optional analyses: **simplified network** (3–4× faster), **ROUTE500**, **multi-profile comparison** (4 mayors side by side), **robustness test**, **Pareto curve**, **Braess removals**.
+- Launch in a background thread, polled every 1.5 s; the dashboard auto-opens when done.
+- Visualize the city's annual score (time / fuel / CO2 / accessibility / equity), the proposed plan with each intervention's detour-before / ΔVHT / BCR / payback, an interactive Leaflet map of saturation v/c colored arcs + plan overlay + numbered markers + Braess overlay, the joint re-evaluation (ΔVHT naive vs joint, redundancy %, BCR), the robustness verdict, the Pareto chart with sweet-spot, the multi-profile comparison table, and a technical footer (n_nodes, n_edges, FW gap, etc.).
+
+### REST endpoints
+
+| Method | URL                       | Purpose                                                |
+|--------|---------------------------|--------------------------------------------------------|
+| GET    | `/`                       | Landing page                                           |
+| GET    | `/dashboard`              | Results dashboard                                      |
+| GET    | `/api/health`             | Healthcheck                                            |
+| GET    | `/api/cities`             | List of preset cities                                  |
+| GET    | `/api/profiles`           | List of mayor profiles with their weights              |
+| POST   | `/api/jobs`               | Start a pipeline → returns `{ job_id }`                |
+| GET    | `/api/jobs/{job_id}`      | Poll status / progress; full result when `status=done` |
+| GET    | `/docs`                   | Swagger UI (auto-generated by FastAPI)                 |
+
+---
+
+## Run the Legacy Streamlit Dashboard
 
 ```bash
 source .venv/bin/activate
@@ -227,3 +272,10 @@ An example city configuration is available in `configs/lyon.yaml` (network, dema
 **`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`**
 - Cause: running the app with Python 3.9.
 - Fix: recreate the environment with Python 3.10+ and reinstall dependencies.
+
+**Web app stuck on "Optimisation en cours…" loader**
+- The pipeline runs in a background thread; the loader polls every 1.5 s. Open the browser console (F12) — `[uo]` lines show the polling state. If "Connexion perdue" appears, restart `uvicorn --reload`. You can also inspect directly: `curl http://localhost:8000/api/jobs/{job_id}`.
+- The "Optimisation profil…" step is monolithic (1–4 min for Villeurbanne with default params) and intermediate progress per-candidate is not yet reported.
+
+**First run on a new city is very long (5–10 min)**
+- OSM + obstacles download + processing. Subsequent runs use the disk cache (`data/raw/network_cache/` + `data/processed/urban_cache/`) and load in a few seconds.

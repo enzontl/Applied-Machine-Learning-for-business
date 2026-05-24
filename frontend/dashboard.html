@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Urban Optimizer — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <a href="/" class="brand-link">
+      <span class="logo">▲</span>
+      <span>Urban Optimizer</span>
+    </a>
+  </div>
+  <nav class="nav">
+    <a href="/">← Nouvelle simulation</a>
+  </nav>
+</header>
+
+<main class="dashboard" id="dashboard" style="display:none;">
+
+  <div class="dash-header">
+    <div>
+      <h1>Plan urbain — <span class="city" id="d-city">…</span></h1>
+      <p class="sub" id="d-sub">Profil <span id="d-profile">…</span> · Budget <span id="d-budget">…</span></p>
+    </div>
+    <div class="tab-switch" id="map-toggle">
+      <button type="button" data-mode="before">Avant</button>
+      <button type="button" data-mode="after" class="active">Après plan</button>
+      <button type="button" data-mode="split">Avant / Après</button>
+    </div>
+  </div>
+
+  <!-- Score actuel (baseline détaillé) -->
+  <section class="dash-section dash-section-tight">
+    <h3 class="dash-section-mini">Score actuel de la ville (avant plan)</h3>
+    <div class="kpis kpis-baseline" id="kpis-baseline"></div>
+  </section>
+
+  <!-- KPI cards principaux (après plan) -->
+  <section class="dash-section dash-section-tight">
+    <h3 class="dash-section-mini">Effet du plan</h3>
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <!-- Bloc re-évaluation jointe -->
+  <section class="dash-section dash-section-tight hidden" id="joint-block">
+    <h3 class="dash-section-mini">Re-évaluation jointe du plan</h3>
+    <div class="kpis kpis-joint" id="kpis-joint"></div>
+    <div id="joint-warning" class="alert alert-warning hidden">
+      ⚠ Redondance élevée : plusieurs interventions se cannibalisent. Envisager d'en retirer pour libérer du budget.
+    </div>
+    <div id="equity-verdict" class="alert hidden"></div>
+  </section>
+
+  <div class="dash-main">
+    <div class="map-card">
+      <div class="header">
+        <div class="title">Saturation du réseau et plan d'aménagement</div>
+        <div class="muted map-info" id="map-info"></div>
+      </div>
+      <div id="map"></div>
+      <div class="legend">
+        <div class="group">
+          <strong class="legend-label">Saturation v/c :</strong>
+          <span class="row-flex"><span class="swatch swatch-sat-flow"></span>fluide</span>
+          <span class="row-flex"><span class="swatch swatch-sat-mid"></span>chargé</span>
+          <span class="row-flex"><span class="swatch swatch-sat-hot"></span>saturé</span>
+          <span class="row-flex"><span class="swatch swatch-sat-jam"></span>bouchon</span>
+        </div>
+        <div class="group">
+          <strong class="legend-label">Plan :</strong>
+          <span class="row-flex"><span class="swatch thick swatch-corridor"></span>élargissement</span>
+          <span class="row-flex"><span class="swatch thick swatch-upgrade"></span>mise à niveau</span>
+          <span class="row-flex"><span class="swatch thick swatch-newroute"></span>nouvelle route</span>
+          <span class="row-flex"><span class="swatch thick dashed"></span>à supprimer (Braess)</span>
+        </div>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div class="panel">
+        <h3 class="panel-title">Interventions retenues</h3>
+        <div class="intervention-list" id="interventions-list"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Bloc comparaison multi-profil (affiché seulement en mode multi) -->
+  <section id="compare-block" class="dash-section hidden">
+    <h2 class="dash-section-title">Comparaison des 4 profils maire</h2>
+    <p class="dash-section-sub">
+      Le même budget. Le même réseau. Quatre arbitrages différents. Voici comment chaque profil
+      arbitre les compromis entre temps gagné, équité d'accès et émissions.
+    </p>
+    <div class="panel panel-flush">
+      <table class="compare-table" id="compare-table">
+        <thead>
+          <tr id="compare-header"></tr>
+        </thead>
+        <tbody id="compare-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Bloc robustesse -->
+  <section id="robust-block" class="dash-section hidden">
+    <h2 class="dash-section-title">Robustesse du plan face aux variations de demande</h2>
+    <p class="dash-section-sub">
+      Le plan reste-t-il bénéfique si la demande baisse (télétravail) ou explose
+      (croissance démographique) ? On le re-évalue sous quatre scénarios.
+    </p>
+    <div class="robust-grid">
+      <div class="panel" id="robust-verdict-panel">
+        <div class="verdict" id="robust-verdict">
+          <div class="verdict-icon" id="robust-icon">?</div>
+          <div>
+            <div class="verdict-label" id="robust-label">—</div>
+            <div class="verdict-sub muted" id="robust-sub">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="panel panel-flush">
+        <table class="compare-table" id="robust-table">
+          <thead>
+            <tr>
+              <th>Demande</th>
+              <th>VHT baseline</th>
+              <th>VHT plan</th>
+              <th>ΔVHT</th>
+              <th>Bénéfice annuel</th>
+              <th>Statut</th>
+            </tr>
+          </thead>
+          <tbody id="robust-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bloc Braess -->
+  <section id="braess-block" class="dash-section hidden">
+    <h2 class="dash-section-title">Arcs à supprimer — paradoxe de Braess</h2>
+    <p class="dash-section-sub">
+      Contre-intuitivement, retirer certains arcs peut <strong>améliorer</strong> le réseau :
+      ces axes attirent du trafic qui congestionne ailleurs (paradoxe de Braess).
+      Les suppressions ci-dessous ont été testées par re-équilibrage Frank-Wolfe.
+    </p>
+    <div class="panel panel-flush">
+      <table class="compare-table" id="braess-table">
+        <thead>
+          <tr>
+            <th>Rang</th>
+            <th>Edge ID</th>
+            <th>Type</th>
+            <th>Longueur</th>
+            <th>ΔVHT en retirant</th>
+            <th>Économie annuelle</th>
+          </tr>
+        </thead>
+        <tbody id="braess-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Footer technique -->
+  <section class="dash-section dash-section-tight">
+    <details class="tech-panel">
+      <summary>État technique du réseau (Frank-Wolfe)</summary>
+      <pre class="tech-text" id="tech-text">…</pre>
+    </details>
+  </section>
+
+  <!-- Bloc Pareto -->
+  <section id="pareto-block" class="dash-section hidden">
+    <h2 class="dash-section-title">Courbe Pareto budget → bénéfice annuel</h2>
+    <p class="dash-section-sub">
+      « Pour 10 / 25 / 50 / 100 / 200 M€, quel bénéfice ? » Le point d'inflexion donne
+      le sweet spot budgétaire — au-delà, chaque euro supplémentaire rapporte moins.
+    </p>
+    <div class="pareto-grid">
+      <div class="panel">
+        <h3 class="panel-title">CAPEX utilisé vs bénéfice annuel</h3>
+        <div class="chart-wrap"><canvas id="pareto-chart"></canvas></div>
+        <div class="sweet-spot hidden" id="sweet-spot">
+          <div class="sweet-spot-icon">🎯</div>
+          <div>
+            <div class="sweet-spot-label">Sweet spot</div>
+            <div class="sweet-spot-value" id="sweet-spot-value">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="panel panel-flush">
+        <table class="compare-table" id="pareto-table">
+          <thead>
+            <tr>
+              <th>Budget</th>
+              <th>CAPEX</th>
+              <th>Inter.</th>
+              <th>Bénéfice/an</th>
+              <th>ΔVHT</th>
+              <th>BCR</th>
+            </tr>
+          </thead>
+          <tbody id="pareto-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- Empty / loading state -->
+<div class="dashboard empty-state" id="empty">
+  <p class="msg">
+    Aucune simulation chargée.
+  </p>
+  <p>
+    <a href="/" class="cta">← Retour au lancement<span class="arrow">↩</span></a>
+  </p>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="/assets/app.js"></script>
+<script>
+  window.addEventListener("DOMContentLoaded", () => {
+    initDashboardPage();
+  });
+</script>
+</body>
+</html>
