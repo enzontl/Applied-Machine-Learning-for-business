@@ -1031,3 +1031,4 @@ button {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 100px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted-2); }
+

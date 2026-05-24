@@ -114,8 +114,10 @@ def compute_accessibility(
         )
 
     # Temps minimal (secondes) de chaque zone vers chaque autre zone
+    # Note: igraph accepte aussi des listes Python pour weights (plus rapide que ndarray)
+    tt_list = tt.tolist()
     times = np.asarray(
-        g.distances(source=zone_nodes, target=zone_nodes, weights=tt.tolist()),
+        g.distances(source=zone_nodes, target=zone_nodes, weights=tt_list),
         dtype=float,
     )
     np.fill_diagonal(times, np.inf)  # une zone n'accède pas à elle-même

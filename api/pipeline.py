@@ -7,6 +7,7 @@ le front, et publie l'état dans le JobRegistry.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from math import isfinite
 from typing import Any
 
@@ -362,23 +363,110 @@ def _plan_geojson(plan: list, net) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
+def _adaptive_params(n_edges: int, req_dict: dict[str, Any]) -> dict[str, Any]:
+    """Ajuste automatiquement les hyper-paramètres selon la taille du graphe.
+
+    IMPORTANT — la tolérance candidat (fw_tol_cand) ne doit JAMAIS dépasser 3e-2.
+    Une intervention typique produit ΔVHT de 1-3 % du VHT baseline. Si la tolérance
+    FW est plus grande, le bruit du solveur noie le signal et TOUT semble "ΔVHT ≈ 0"
+    → aucune intervention retenue.
+
+    Petite ville (<5k arcs)  : paramètres bruts de la requête.
+    Moyenne (5k–15k)         : réduction modérée.
+    Grande (>15k)            : réduction agressive (moins de candidats, pas de tolérance folle).
+    """
+    params: dict[str, Any] = {}
+
+    if n_edges > 15_000:
+        # Grande ville (Lyon non simplifié, ~30k arcs)
+        params["max_iter_ue"] = min(int(req_dict.get("max_iter_ue", 50)), 30)
+        params["fw_max_iter"] = 10
+        params["fw_max_iter_cand"] = 5
+        params["fw_tol"] = 5e-3
+        params["fw_tol_cand"] = 2e-2        # ← JAMAIS > 3e-2 sinon signal noyé
+        params["max_fw_evals"] = min(int(req_dict.get("max_fw_evals", 8)), 5)
+        params["max_candidates"] = min(int(req_dict.get("max_candidates", 20)), 12)
+        params["screen_factor"] = 1.3
+        params["rob_max_iter"] = 8
+        params["rob_tol"] = 1e-2
+        logger.info(f"Adaptive params: GRANDE ville ({n_edges} arcs) — candidats réduits")
+    elif n_edges > 5_000:
+        # Ville moyenne
+        params["max_iter_ue"] = min(int(req_dict.get("max_iter_ue", 50)), 40)
+        params["fw_max_iter"] = 12
+        params["fw_max_iter_cand"] = 5
+        params["fw_tol"] = 5e-3
+        params["fw_tol_cand"] = 2e-2        # ← JAMAIS > 3e-2
+        params["max_fw_evals"] = min(int(req_dict.get("max_fw_evals", 8)), 7)
+        params["max_candidates"] = min(int(req_dict.get("max_candidates", 20)), 15)
+        params["screen_factor"] = 1.4
+        params["rob_max_iter"] = 10
+        params["rob_tol"] = 8e-3
+        logger.info(f"Adaptive params: ville MOYENNE ({n_edges} arcs)")
+    else:
+        # Petite ville — paramètres utilisateur
+        params["max_iter_ue"] = int(req_dict.get("max_iter_ue", 50))
+        params["fw_max_iter"] = 15
+        params["fw_max_iter_cand"] = 5
+        params["fw_tol"] = 5e-3
+        params["fw_tol_cand"] = 2e-2        # ← JAMAIS > 3e-2
+        params["max_fw_evals"] = int(req_dict.get("max_fw_evals", 8))
+        params["max_candidates"] = int(req_dict.get("max_candidates", 20))
+        params["screen_factor"] = 1.5
+        params["rob_max_iter"] = 15
+        params["rob_tol"] = 5e-3
+        logger.info(f"Adaptive params: PETITE ville ({n_edges} arcs) — paramètres bruts")
+
+    return params
+
+
 def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
     """Lance le pipeline complet et stocke le résultat sérialisable dans job.result.
 
     Appelé en background thread. Met à jour job.progress + job.step au fil de l'eau.
     """
     try:
+        import time as _time
+        _t0_pipeline = _time.perf_counter()
+
+        def _elapsed() -> str:
+            return f"{_time.perf_counter() - _t0_pipeline:.1f}s"
+
+        def _step_timer(label: str) -> float:
+            t = _time.perf_counter()
+            return t
+
         job.update(status="running", progress=0.02, step="Construction du réseau…")
         city = req_dict["city"]
         include_route500 = req_dict["include_route500"]
         simplified_highway = req_dict.get("simplified_highway", False)
+
+        _t = _step_timer("build_network")
         net = build_network(
             city,
             include_route500=include_route500,
             simplified_highway=simplified_highway,
         )
+        logger.info(f"⏱ build_network : {_time.perf_counter() - _t:.1f}s")
+
+        # ── Auto-adaptation des paramètres selon la taille du graphe ──
+        n_edges = net.graph.ecount()
+        ap = _adaptive_params(n_edges, req_dict)
+        logger.info(
+            f"Réseau construit : {net.graph.vcount()} nœuds, {n_edges} arcs "
+            f"(simplified={simplified_highway})"
+        )
+
+        # ── Lancer le chargement des obstacles en arrière-plan ──────────
+        # Les obstacles sont indépendants du réseau OD / UE / accessibilité.
+        # On les télécharge pendant que le FW tourne → gain ~60-180 s au premier run.
+        _obs_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="obs")
+        _fut_obstacles = _obs_pool.submit(load_obstacles, city)
+        _fut_bridges   = _obs_pool.submit(load_bridge_triggers, city)
+        _t_obs_start   = _time.perf_counter()
 
         job.update(progress=0.10, step="Génération de la demande OD…")
+        _t = _step_timer("generate_od")
         od = generate_od_matrix(
             net,
             hour=req_dict["hour"],
@@ -386,20 +474,28 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             n_cells=req_dict["n_cells"],
             scale_factor=req_dict["scale_factor"],
         )
+        logger.info(f"⏱ generate_od : {_time.perf_counter() - _t:.1f}s")
 
-        max_iter_ue = int(req_dict.get("max_iter_ue", 100))
+        max_iter_ue = ap["max_iter_ue"]
         job.update(progress=0.20, step=f"Affectation Frank-Wolfe ({max_iter_ue} itérations)…")
+        _t = _step_timer("UE baseline")
         ue = solve_user_equilibrium(net, od, max_iter=max_iter_ue, tol=1e-4)
+        logger.info(f"⏱ UE baseline : {_time.perf_counter() - _t:.1f}s ({ue.iterations} iter, gap={ue.final_gap:.2e})")
 
         job.update(progress=0.40, step="Accessibilité + score de base…")
+        _t = _step_timer("accessibility")
         access_thresh_s = float(req_dict["access_threshold_min"]) * 60.0
         baseline_access = compute_accessibility(
             net, od, ue, threshold_seconds=access_thresh_s,
         )
+        logger.info(f"⏱ accessibility : {_time.perf_counter() - _t:.1f}s")
 
-        job.update(progress=0.45, step="Chargement obstacles OSM…")
-        obstacles = load_obstacles(city)
-        bridges = load_bridge_triggers(city)
+        # ── Récupérer les obstacles (déjà chargés en arrière-plan) ─────
+        job.update(progress=0.45, step="Obstacles OSM…")
+        obstacles = _fut_obstacles.result()
+        bridges   = _fut_bridges.result()
+        _obs_pool.shutdown(wait=False)
+        logger.info(f"⏱ load_obstacles+bridges : {_time.perf_counter() - _t_obs_start:.1f}s (parallèle avec OD+UE+access)")
 
         # Profils à évaluer
         if req_dict["multi_profile"]:
@@ -436,18 +532,22 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
                 step=f"Optimisation profil {profile.label}…",
             )
 
+            _t = _step_timer(f"propose_urban_plan[{prof_name}]")
             plan, baseline_score, joint = propose_urban_plan(
                 net, od, profile, ue,
                 budget_eur=req_dict["budget_meur"] * 1e6,
-                max_proposals=req_dict["max_candidates"],
-                max_fw_evals=req_dict["max_fw_evals"],
-                fw_max_iter=25, fw_tol=5e-3,
+                max_proposals=ap["max_candidates"],
+                max_fw_evals=ap["max_fw_evals"],
+                fw_max_iter=ap["fw_max_iter"], fw_tol=ap["fw_tol"],
+                fw_max_iter_cand=ap["fw_max_iter_cand"], fw_tol_cand=ap["fw_tol_cand"],
+                screen_factor=ap["screen_factor"],
                 obstacle_index=obstacles,
                 soft_index=bridges,
                 periphery_margin_m=float(req_dict["periphery_margin_m"]),
                 accessibility_threshold_s=access_thresh_s,
                 _baseline_access=baseline_access,
             )
+            logger.info(f"⏱ propose_urban_plan[{prof_name}] : {_time.perf_counter() - _t:.1f}s → {len(plan)} interventions")
 
             # Sat après = depuis le joint (sinon = avant)
             if joint is not None and joint.existing_sat_after.size == len(capacity):
@@ -505,7 +605,7 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
                 c for c in generate_candidates(net, ue, top_n=15)
                 if c.action == "remove"
             ]
-            evals_rem = rank_candidates(net, od, removal_cands, ue, max_iter=50, tol=1e-3)
+            evals_rem = rank_candidates(net, od, removal_cands, ue, max_iter=ap["fw_max_iter"], tol=ap["fw_tol"])
             braess_evals = [e for e in evals_rem if e.is_braess][:3]
             braess_payload = _braess_payload(braess_evals)
             braess_geojson = _braess_geojson(braess_evals, net)
@@ -519,7 +619,7 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             rob = evaluate_plan_robustness(
                 net, od, main_plan, main_profile,
                 demand_scales=(0.8, 1.0, 1.2, 1.5),
-                fw_max_iter=25, fw_tol=5e-3,
+                fw_max_iter=ap["rob_max_iter"], fw_tol=ap["rob_tol"],
             )
             robustness_payload = _serialize_robustness(rob)
             analyses_base += analyses_step
@@ -532,9 +632,11 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             par = compute_pareto_frontier(
                 net, od, main_profile or PROFILE_BY_NAME[profile_names[0]], ue,
                 budgets_eur=(5e6, 15e6, 30e6, 60e6, 120e6, 250e6),
-                max_proposals=req_dict["max_candidates"],
-                max_fw_evals=req_dict["max_fw_evals"],
-                fw_max_iter=25, fw_tol=5e-3,
+                max_proposals=ap["max_candidates"],
+                max_fw_evals=ap["max_fw_evals"],
+                fw_max_iter=ap["fw_max_iter"], fw_tol=ap["fw_tol"],
+                fw_max_iter_cand=ap["fw_max_iter_cand"], fw_tol_cand=ap["fw_tol_cand"],
+                screen_factor=ap["screen_factor"],
                 obstacle_index=obstacles,
                 soft_index=bridges,
                 periphery_margin_m=float(req_dict["periphery_margin_m"]),
@@ -542,9 +644,11 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             )
             pareto_payload = _serialize_pareto(par)
 
+        logger.info(f"⏱⏱ PIPELINE TOTAL : {_elapsed()} pour {city}")
+
         job.update(
             progress=1.0,
-            step="Terminé.",
+            step=f"Terminé en {_elapsed()}.",
             status="done",
             result={
                 "city": city,

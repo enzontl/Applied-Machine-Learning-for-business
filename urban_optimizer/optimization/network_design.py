@@ -172,7 +172,9 @@ class JointPlanResult:
 # ── Utilitaires ──────────────────────────────────────────────────────────────
 
 def _shortest_length(g: ig.Graph, sources: list[int], targets: list[int]) -> np.ndarray:
-    mat = g.distances(source=sources, target=targets, weights="length_m")
+    # Pré-extraire les poids en liste (igraph est plus rapide avec list qu'un attribut string)
+    w = g.es["length_m"]
+    mat = g.distances(source=sources, target=targets, weights=w)
     return np.asarray(mat, dtype=float)
 
 
@@ -217,7 +219,7 @@ def generate_corridor_candidates(
     max_length_m: float = 5_000.0,
     min_detour_ratio: float = 1.25,
     saturation_threshold: float = 0.65,
-    max_candidates: int = 80,
+    max_candidates: int = 40,
 ) -> list[NewArcProposal]:
     """Identifie les corridors existants à élargir pour réduire la congestion.
 
@@ -293,7 +295,9 @@ def generate_corridor_candidates(
             if not edge_ids:
                 continue
 
-            corridor_length = float(sum(lengths[e] for e in edge_ids))
+            # Vectorisé : indexation numpy directe sur le corridor
+            eids_arr = np.asarray(edge_ids, dtype=np.intp)
+            corridor_length = float(lengths[eids_arr].sum())
             if corridor_length < min_length_m or corridor_length > max_length_m:
                 continue
 
@@ -302,12 +306,12 @@ def generate_corridor_candidates(
             vpath = _vpath_from_epath(g, u_node, edge_ids)
             corridor_xy = [nodes_xy[v] for v in vpath if v in nodes_xy]
 
-            # Propriétés du corridor
+            # Propriétés du corridor — indexation numpy vectorisée
             hw_list = [hw_types[e] for e in edge_ids]
             corridor_hw = max(hw_list, key=lambda h: _HW_RANK.get(h, 0))
-            corridor_cap = float(np.min([capacity[e] for e in edge_ids]))
+            corridor_cap = float(capacity[eids_arr].min())
             corridor_speed = float(np.min([free_speeds[e] for e in edge_ids]))
-            avg_sat = float(np.mean([sat_arr[e] for e in edge_ids]))
+            avg_sat = float(sat_arr[eids_arr].mean())
 
             cost_per_m = _widening_cost_per_m(corridor_hw)
             total_cost = corridor_length * cost_per_m
@@ -348,7 +352,7 @@ def generate_upgrade_candidates(
     min_detour_ratio: float = 1.25,
     capacity_threshold: float = 1_800.0,
     saturation_avoid: float = 0.35,
-    max_candidates: int = 80,
+    max_candidates: int = 40,
 ) -> list[NewArcProposal]:
     """Identifie des petites rues à transformer en axe principal (mise à niveau).
 
@@ -421,12 +425,13 @@ def generate_upgrade_candidates(
             if not edge_ids:
                 continue
 
-            # Ne retenir que les corridors qui passent majoritairement par des petites rues
-            edge_caps = [capacity[e] for e in edge_ids]
+            # Vectorisé : indexation numpy directe
+            eids_arr = np.asarray(edge_ids, dtype=np.intp)
+            edge_caps = capacity[eids_arr]
             if float(np.median(edge_caps)) > capacity_threshold:
                 continue  # déjà un axe principal — pas une mise à niveau
 
-            corridor_length = float(sum(lengths[e] for e in edge_ids))
+            corridor_length = float(lengths[eids_arr].sum())
             if corridor_length < min_length_m or corridor_length > max_length_m:
                 continue
 
@@ -436,9 +441,9 @@ def generate_upgrade_candidates(
 
             hw_list = [hw_types[e] for e in edge_ids]
             corridor_hw = max(hw_list, key=lambda h: _HW_RANK.get(h, 0))
-            corridor_cap = float(np.min(edge_caps))
+            corridor_cap = float(edge_caps.min())
             corridor_speed = float(np.min([free_speeds[e] for e in edge_ids]))
-            avg_sat = float(np.mean([sat_arr[e] for e in edge_ids]))
+            avg_sat = float(sat_arr[eids_arr].mean())
 
             cost_per_m = _widening_cost_per_m(corridor_hw)
             total_cost = corridor_length * cost_per_m
@@ -1008,7 +1013,7 @@ class _JointContext:
         self.added_eids: list[int] = []
 
     def __enter__(self):
-        # 1. Élargissements : on note la capacité d'origine puis on multiplie
+        # 1. Élargissements : bulk read-modify-write (igraph bulk est plus rapide que per-edge)
         caps = list(self.g.es["capacity"])
         for p in self.proposals:
             if p.is_corridor:
@@ -1044,7 +1049,7 @@ class _JointContext:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # Restaurer les capacités
+        # Restaurer les capacités (bulk)
         if self.corridor_edges:
             caps = list(self.g.es["capacity"])
             for eid, orig in self.corridor_edges.items():
@@ -1084,6 +1089,7 @@ def _evaluate(
     *,
     max_iter: int,
     tol: float,
+    baseline_access: "AccessibilityReport | None" = None,
 ) -> NewArcEvaluation:
     g = network.graph
     ctx = _CorridorContext(g, prop) if prop.is_corridor else _NewArcContext(g, prop)
@@ -1093,7 +1099,11 @@ def _evaluate(
             network, od, max_iter=max_iter, tol=tol, initial_flows=warm,
         )
 
-    new_score = score_network(new_ue, profile)
+    # IMPORTANT : scorer le candidat AVEC la même accessibilité que le baseline,
+    # sinon baseline a access_value déduit mais pas le candidat → benefit toujours négatif.
+    # L'accessibilité ne change quasiment pas pour un candidat individuel (quelques arcs),
+    # la vraie mesure est faite dans le FW joint final.
+    new_score = score_network(new_ue, profile, access=baseline_access)
     delta_vht = baseline_ue.vht - new_ue.vht
     annual_benefit = baseline_score.total_annual_cost_eur - new_score.total_annual_cost_eur
 
@@ -1202,6 +1212,7 @@ def _evaluate_proposals(
     fw_tol: float,
     n_jobs: int = -1,
     progress_callback=None,
+    baseline_access: "AccessibilityReport | None" = None,
 ) -> list[NewArcEvaluation]:
     """Évalue chaque proposition individuellement (1 FW par candidat).
 
@@ -1219,15 +1230,14 @@ def _evaluate_proposals(
     import time
     t0 = time.time()
 
-    # Si un callback de progression est fourni, on force le mode séquentiel pour
-    # pouvoir le notifier candidat par candidat.
-    use_parallel = n_jobs != 1 and len(proposals) >= 2 and progress_callback is None
-    if not use_parallel:
-        evals: list[NewArcEvaluation] = []
+    # Mode séquentiel si callback fourni ou 1 seul candidat
+    evals: list[NewArcEvaluation] = []
+    if progress_callback is not None or len(proposals) < 2:
         for i, prop in enumerate(proposals, start=1):
             ev = _evaluate(
                 network, od, prop, baseline_ue, baseline_score, profile,
                 max_iter=fw_max_iter, tol=fw_tol,
+                baseline_access=baseline_access,
             )
             evals.append(ev)
             logger.info(
@@ -1240,28 +1250,27 @@ def _evaluate_proposals(
                 try:
                     progress_callback(i, len(proposals))
                 except Exception:
-                    pass  # ne jamais laisser un callback casser l'évaluation
+                    pass
         logger.info(f"  Évaluation séquentielle terminée en {time.time()-t0:.1f}s")
         return evals
 
-    # Parallèle — joblib loky (process-based, isolation automatique du graphe)
-    from joblib import Parallel, delayed
-    logger.info(f"  Évaluation parallèle de {len(proposals)} candidats (n_jobs={n_jobs})")
-    evals = list(Parallel(n_jobs=n_jobs, backend="loky", verbose=0)(
-        delayed(_evaluate)(
+    # Séquentiel (igraph mutate le graphe in-place → pas thread-safe sans copie)
+    # Le goulot est I/O-like (igraph C Dijkstra) mais les contextes mutent g.es
+    # donc on reste séquentiel pour l'instant — le gain vient des réductions de params.
+    for i, prop in enumerate(proposals, start=1):
+        ev = _evaluate(
             network, od, prop, baseline_ue, baseline_score, profile,
             max_iter=fw_max_iter, tol=fw_tol,
+            baseline_access=baseline_access,
         )
-        for prop in proposals
-    ))
-    for i, (prop, ev) in enumerate(zip(proposals, evals), start=1):
+        evals.append(ev)
         logger.info(
             f"  [{i:>2}/{len(proposals)}] {prop.highway:>9s} {prop.length_m:>5.0f}m "
             f"u={prop.u_node} v={prop.v_node} "
             f"ΔVHT={ev.delta_vht_h:>+7.1f}h benef={ev.annual_benefit_eur:>+12,.0f}€/an "
             f"BCR={ev.bcr:>5.2f} payback={ev.payback_years:>5.1f}y"
         )
-    logger.info(f"  Évaluation parallèle terminée en {time.time()-t0:.1f}s")
+    logger.info(f"  Évaluation terminée en {time.time()-t0:.1f}s")
     return evals
 
 
@@ -1309,14 +1318,8 @@ def _quick_fw_screen(
             )
         return ue1.vht
 
-    use_parallel = n_jobs != 1 and len(candidates) >= 2
-    if use_parallel:
-        from joblib import Parallel, delayed
-        vhts = list(Parallel(n_jobs=n_jobs, backend="loky", verbose=0)(
-            delayed(_vht_after_1iter)(p) for p in candidates
-        ))
-    else:
-        vhts = [_vht_after_1iter(p) for p in candidates]
+    # Séquentiel — les contextes mutent g.es in-place (non thread-safe)
+    vhts = [_vht_after_1iter(p) for p in candidates]
 
     # ΔVHT positif = bon candidat ; on garde les keep_top meilleurs
     scored = sorted(zip(vhts, candidates), key=lambda kv: kv[0])
@@ -1414,12 +1417,12 @@ def propose_urban_plan(
     budget_eur: float = 50_000_000.0,
     max_proposals: int = 60,
     max_fw_evals: int = 15,
-    fw_max_iter: int = 25,                          # FW JOINT (re-éval finale, stricte)
+    fw_max_iter: int = 15,                          # FW JOINT (re-éval finale) — réduit de 25, warm-start converge vite
     fw_tol: float = 5e-3,                           # FW JOINT
-    fw_max_iter_cand: int = 10,                     # FW par candidat (relâché)
-    fw_tol_cand: float = 5e-2,                      # FW par candidat (relâché)
+    fw_max_iter_cand: int = 5,                      # FW par candidat — réduit de 10 (warm-start converge vite)
+    fw_tol_cand: float = 2e-2,                      # FW par candidat — JAMAIS > 3e-2 sinon le signal ΔVHT (~1-3%) est noyé
     n_jobs: int = -1,                               # workers joblib (-1 = tous cœurs)
-    screen_factor: float = 2.0,                    # pool initial = screen_factor × max_fw_evals
+    screen_factor: float = 1.5,                     # pool initial = screen_factor × max_fw_evals — réduit de 2.0
     building_index: ObstacleIndex | None = None,    # rétrocompat (= obstacle_index)
     obstacle_index: ObstacleIndex | None = None,    # obstacles durs (bâtiments, parcs)
     soft_index: ObstacleIndex | None = None,        # ponts (voies ferrées, eau)
@@ -1487,6 +1490,7 @@ def propose_urban_plan(
         network, od, profile, baseline_ue, baseline_score, pre,
         fw_max_iter=fw_max_iter_cand, fw_tol=fw_tol_cand,
         n_jobs=n_jobs,
+        baseline_access=baseline_access,
     )
 
     # 3. Sélection gloutonne sous budget

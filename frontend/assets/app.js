@@ -874,3 +874,4 @@ function switchMapMode(mode) {
   }
   CURRENT_MODE = mode;
 }
+

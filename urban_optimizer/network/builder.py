@@ -16,9 +16,12 @@ logger = get_logger(__name__)
 
 _CACHE_DIR = RAW_DIR / "network_cache"
 
+# Incrémenter à chaque changement structurel du graphe (ex: ajout composante connexe)
+_CACHE_VERSION = 2
+
 
 def _cache_key(city: str, include_route500: bool, simplified: bool) -> Path:
-    slug = hashlib.md5(f"{city}|{include_route500}|{simplified}".encode()).hexdigest()[:16]
+    slug = hashlib.md5(f"v{_CACHE_VERSION}|{city}|{include_route500}|{simplified}".encode()).hexdigest()[:16]
     return _CACHE_DIR / f"{slug}.pkl"
 
 

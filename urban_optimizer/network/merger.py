@@ -108,5 +108,36 @@ def build_unified_network(
     )
 
     source_counts = {s: attrs["source"].count(s) for s in set(attrs["source"])}
-    logger.info(f"Graphe unifié — nœuds: {g.vcount():,}, arcs: {g.ecount():,} {source_counts}")
+    logger.info(f"Graphe brut — nœuds: {g.vcount():,}, arcs: {g.ecount():,} {source_counts}")
+
+    # ── Extraire la plus grande composante faiblement connexe ──────────
+    # Sans ça, Dijkstra spamme des milliers de warnings "Couldn't reach
+    # some vertices" et le pipeline prend 10× plus de temps.
+    components = g.connected_components(mode="weak")
+    if len(components) > 1:
+        giant_id = max(range(len(components)), key=lambda i: len(components[i]))
+        keep_vids = sorted(components[giant_id])
+        n_removed = g.vcount() - len(keep_vids)
+        logger.info(
+            f"Graphe déconnecté : {len(components)} composantes. "
+            f"On garde la principale ({len(keep_vids):,} nœuds), "
+            f"suppression de {n_removed:,} nœuds isolés."
+        )
+        # Sous-graphe induit
+        g_sub = g.induced_subgraph(keep_vids)
+
+        # Re-mapper nodes_xy et edges_gdf
+        old_to_new = {old: new for new, old in enumerate(keep_vids)}
+        nodes_xy = {old_to_new[old]: nodes_xy[old] for old in keep_vids}
+
+        # Filtrer edges_gdf : garder uniquement les arcs du sous-graphe
+        kept_eids = set()
+        for e in g.es:
+            if e.source in old_to_new and e.target in old_to_new:
+                kept_eids.add(e.index)
+        edges_gdf_out = edges_gdf_out.iloc[sorted(kept_eids)].reset_index(drop=True)
+
+        g = g_sub
+        logger.info(f"Graphe connexe — nœuds: {g.vcount():,}, arcs: {g.ecount():,}")
+
     return UrbanNetwork(graph=g, nodes_xy=nodes_xy, edges_gdf=edges_gdf_out, crs=crs)

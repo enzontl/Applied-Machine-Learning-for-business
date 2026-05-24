@@ -85,7 +85,7 @@ def compute_pareto_frontier(
     fw_max_iter: int = 25,                  # FW JOINT (par budget, strict)
     fw_tol: float = 5e-3,                   # FW JOINT
     fw_max_iter_cand: int = 10,             # FW par candidat (relâché)
-    fw_tol_cand: float = 5e-2,              # FW par candidat (relâché)
+    fw_tol_cand: float = 2e-2,              # FW par candidat — JAMAIS > 3e-2 (signal ΔVHT ~1-3%)
     n_jobs: int = -1,                       # workers joblib (-1 = tous cœurs)
     screen_factor: float = 2.0,             # pool initial = screen_factor × max_fw_evals
     obstacle_index: ObstacleIndex | None = None,
@@ -130,6 +130,7 @@ def compute_pareto_frontier(
         network, od, profile, baseline_ue, baseline_score, pre,
         fw_max_iter=fw_max_iter_cand, fw_tol=fw_tol_cand,
         n_jobs=n_jobs,
+        baseline_access=baseline_access,
     )
 
     # 4. Pour chaque budget : greedy + joint

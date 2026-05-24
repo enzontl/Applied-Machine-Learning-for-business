@@ -105,14 +105,14 @@ def _solve_with_patch(
     )
 
     try:
-        g.es["capacity"] = list(cap)
-        g.es["t0_s"] = list(t0)
+        g.es["capacity"] = cap.tolist()
+        g.es["t0_s"] = t0.tolist()
         res = solve_user_equilibrium(
             network, od, max_iter=max_iter, tol=tol,
         )
     finally:
-        g.es["capacity"] = list(original_cap)
-        g.es["t0_s"] = list(original_t0)
+        g.es["capacity"] = original_cap.tolist()
+        g.es["t0_s"] = original_t0.tolist()
 
     return res
 

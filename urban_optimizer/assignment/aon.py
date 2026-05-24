@@ -82,9 +82,11 @@ def assign_aon(
 
     n_sources = len(by_source)
 
+    n_edges = graph.ecount()
+
     def _dijkstra_source(item: tuple) -> np.ndarray:
         source, (targets, trips_list) = item
-        local = np.zeros(graph.ecount(), dtype=float)
+        local = np.zeros(n_edges, dtype=float)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning, message="Couldn't reach")
             epaths = graph.get_shortest_paths(

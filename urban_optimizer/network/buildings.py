@@ -5,19 +5,29 @@ Deux catégories :
   une nouvelle route ne peut pas les traverser.
 - **Déclencheurs de pont** (``load_bridge_triggers``) : voies ferrées et cours d'eau —
   traversables avec un pont, à coût majoré.
+
+Les résultats sont cachés sur disque (pickle) pour éviter de re-télécharger
+les données Overpass à chaque exécution (~200 s économisées).
 """
 
 from __future__ import annotations
+
+import hashlib
+import pickle
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import geopandas as gpd
 import osmnx as ox
 from shapely import STRtree
 from shapely.geometry import LineString
 
-from urban_optimizer.config import CRS_LAMBERT93
+from urban_optimizer.config import CRS_LAMBERT93, RAW_DIR
 from urban_optimizer.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+_OBS_CACHE_DIR = RAW_DIR / "obstacle_cache"
 
 _ROAD_HALF_WIDTH_M = 5.0
 
@@ -70,6 +80,27 @@ class ObstacleIndex:
 BuildingIndex = ObstacleIndex
 
 
+def _fetch_one_layer(
+    city: str, lbl: str, tags: dict, buf: float, crs: int,
+) -> list:
+    """Télécharge UNE couche Overpass et renvoie les géométries (thread-safe)."""
+    try:
+        gdf = ox.features_from_place(city, tags=tags)
+        gdf = gdf.to_crs(epsg=crs)
+        if buf > 0:
+            lines = gdf[gdf.geometry.geom_type.isin(["LineString", "MultiLineString"])]
+            polys = [g.buffer(buf) for g in lines.geometry if g is not None]
+            logger.info(f"  {lbl} : {len(polys):,} lignes buffées {buf:.0f}m")
+            return polys
+        else:
+            polys = gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])]
+            logger.info(f"  {lbl} : {len(polys):,} polygones")
+            return list(polys.geometry)
+    except Exception as exc:
+        logger.warning(f"  {lbl} non chargé ({exc})")
+        return []
+
+
 def _load_layers(
     city: str,
     layers: list[tuple[str, dict, float]],
@@ -77,42 +108,62 @@ def _load_layers(
     label: str,
 ) -> ObstacleIndex:
     all_geoms: list = []
-    for lbl, tags, buf in layers:
-        try:
-            gdf = ox.features_from_place(city, tags=tags)
-            gdf = gdf.to_crs(epsg=crs)
-            if buf > 0:
-                lines = gdf[gdf.geometry.geom_type.isin(["LineString", "MultiLineString"])]
-                polys = [g.buffer(buf) for g in lines.geometry if g is not None]
-                all_geoms.extend(polys)
-                logger.info(f"  {lbl} : {len(polys):,} lignes buffées {buf:.0f}m")
-            else:
-                polys = gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])]
-                all_geoms.extend(list(polys.geometry))
-                logger.info(f"  {lbl} : {len(polys):,} polygones")
-        except Exception as exc:
-            logger.warning(f"  {lbl} non chargé ({exc})")
+    # Paralléliser les appels Overpass (I/O-bound, le GIL ne gêne pas)
+    with ThreadPoolExecutor(max_workers=len(layers)) as pool:
+        futures = {
+            pool.submit(_fetch_one_layer, city, lbl, tags, buf, crs): lbl
+            for lbl, tags, buf in layers
+        }
+        for fut in as_completed(futures):
+            all_geoms.extend(fut.result())
     return ObstacleIndex(all_geoms, label=label)
+
+
+def _obs_cache_path(city: str, label: str) -> Path:
+    slug = hashlib.md5(f"{city}|{label}".encode()).hexdigest()[:16]
+    return _OBS_CACHE_DIR / f"{slug}.pkl"
 
 
 def load_obstacles(city: str, crs: int = CRS_LAMBERT93) -> ObstacleIndex:
     """Obstacles durs : bâtiments, parcs, forêts, friches.
 
     Une nouvelle route ne peut pas traverser ces zones.
-    Pour les voies ferrées et cours d'eau (traversables par pont), utiliser
-    ``load_bridge_triggers``.
+    Résultat caché sur disque pour éviter re-téléchargement Overpass.
     """
+    cp = _obs_cache_path(city, "hard")
+    if cp.exists():
+        logger.info(f"Obstacles durs chargés depuis cache : {cp.name}")
+        with open(cp, "rb") as f:
+            return pickle.load(f)
+
     logger.info(f"Chargement obstacles durs OSM : {city}")
-    return _load_layers(city, _HARD_OBSTACLE_LAYERS, crs, "obstacles durs")
+    idx = _load_layers(city, _HARD_OBSTACLE_LAYERS, crs, "obstacles durs")
+    _OBS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(cp, "wb") as f:
+        pickle.dump(idx, f)
+    logger.info(f"Obstacles durs mis en cache : {cp.name}")
+    return idx
 
 
 def load_bridge_triggers(city: str, crs: int = CRS_LAMBERT93) -> ObstacleIndex:
     """Obstacles doux : voies ferrées et cours d'eau.
 
     Traversables avec un pont — coût majoré mais pas bloquants.
+    Résultat caché sur disque pour éviter re-téléchargement Overpass.
     """
+    cp = _obs_cache_path(city, "soft")
+    if cp.exists():
+        logger.info(f"Déclencheurs de pont chargés depuis cache : {cp.name}")
+        with open(cp, "rb") as f:
+            return pickle.load(f)
+
     logger.info(f"Chargement déclencheurs de pont OSM : {city}")
-    return _load_layers(city, _BRIDGE_TRIGGER_LAYERS, crs, "ponts")
+    idx = _load_layers(city, _BRIDGE_TRIGGER_LAYERS, crs, "ponts")
+    _OBS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(cp, "wb") as f:
+        pickle.dump(idx, f)
+    logger.info(f"Déclencheurs de pont mis en cache : {cp.name}")
+    return idx
 
 
 def load_buildings(city: str, crs: int = CRS_LAMBERT93) -> ObstacleIndex:

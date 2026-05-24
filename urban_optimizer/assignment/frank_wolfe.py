@@ -45,17 +45,20 @@ def _line_search(
     x: np.ndarray,
     y: np.ndarray,
     cost_fn: Callable[[np.ndarray], np.ndarray],
-    n_iter: int = 25,
+    n_iter: int = 12,
 ) -> float:
     """Trouve λ ∈ [0,1] qui minimise Z(x + λ·(y-x)).
 
     Z' à minimiser : (y - x)·t(x + λ·(y-x)). On bissectionne sur ce signe.
     Si Z'(0) ≥ 0, prendre λ=0 (déjà optimal). Si Z'(1) ≤ 0, prendre λ=1.
+
+    12 itérations suffisent (précision 1/4096 ≈ 2.4e-4 sur [0,1]).
     """
     d = y - x
 
     def zprime(lam: float) -> float:
-        return float(np.sum(d * cost_fn(x + lam * d)))
+        # np.dot est plus rapide que np.sum(a*b) — une seule passe, pas de temp
+        return float(np.dot(d, cost_fn(x + lam * d)))
 
     if zprime(0.0) >= 0.0:
         return 0.0
@@ -88,8 +91,9 @@ def _relative_gap(
                  par AoN sur les temps actuels (borne inférieure).
     Plus le gap est petit, plus on est proche de Wardrop.
     """
-    tt = float((flows * times).sum())
-    tt_aon = float((target_flows * times).sum())
+    # np.dot évite la création d'un tableau temporaire (1 passe au lieu de 2)
+    tt = float(np.dot(flows, times))
+    tt_aon = float(np.dot(target_flows, times))
     if tt <= 0.0:
         return 0.0
     return abs(tt - tt_aon) / tt
@@ -126,7 +130,7 @@ def _frank_wolfe(
 
     for k in range(1, max_iter + 1):
         # On convertit perceived en list UNE seule fois par itération
-        # (au lieu d'une fois par appel AoN ; igraph est plus rapide avec list que np.array)
+        # (igraph est plus rapide avec list que np.array pour les poids)
         perceived_list = perceived.tolist()
         target = assign_aon(g, od, weights=perceived_list)
         gap = _relative_gap(flows, target, perceived)
@@ -136,7 +140,18 @@ def _frank_wolfe(
             break
 
         lam = _line_search(flows, target, cost_fn)
-        flows = (1.0 - lam) * flows + lam * target
+
+        # Détection de stagnation : λ < 1e-6 signifie que la direction AoN
+        # n'améliore quasiment plus l'objectif — convergence pratique.
+        if lam < 1e-6:
+            converged = True
+            logger.info(f"  iter {k:>3}: gap={gap:.2e}, λ={lam:.2e} ← stagnation")
+            break
+
+        # Mise à jour in-place : évite 2 allocations (1-lam)*flows et lam*target
+        d = target - flows         # direction de descente
+        d *= lam                   # d = lam * (target - flows)
+        flows += d                 # flows = flows + lam * (target - flows)
         perceived = cost_fn(flows)
 
         if k % 10 == 0 or k == 1:
@@ -145,7 +160,7 @@ def _frank_wolfe(
     # Pour le reporting on utilise toujours le coût BPR moyen (pas marginal),
     # pour que VHT(SO) soit comparable à VHT(UE) sur la même métrique physique.
     actual_times = bpr_time(flows, t0, capacity, alpha, beta)
-    vht = float((flows * actual_times).sum() / 3600.0)
+    vht = float(np.dot(flows, actual_times) / 3600.0)
     return AssignmentResult(
         flows=flows,
         travel_times=actual_times,

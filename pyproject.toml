@@ -37,8 +37,8 @@ dependencies = [
     "plotly>=5.18",
 
     # --- Application ---
-    "streamlit>=1.30",     # dashboard
-    "streamlit-folium>=0.20",  # carte interactive dans streamlit
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
     "tqdm>=4.66",          # barres de progression
 
     # --- Données INSEE / API ---

@@ -70,3 +70,4 @@ outputs/
 results/
 
 !notebooks/*.html
+!frontend/*.html
