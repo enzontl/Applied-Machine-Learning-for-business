@@ -17,7 +17,11 @@ from urban_optimizer.assignment import solve_user_equilibrium
 from urban_optimizer.config import CRS_WGS84
 from urban_optimizer.demand import generate_od_matrix
 from urban_optimizer.diagnosis import compute_accessibility
-from urban_optimizer.network import build_network, load_bridge_triggers, load_obstacles
+from urban_optimizer.network import build_network, load_bridge_triggers, load_obstacles, purge_old_caches
+
+# Purger les anciens caches réseau au chargement du module (1 seule fois)
+# pour forcer la reconstruction avec composante connexe.
+purge_old_caches()
 from urban_optimizer.optimization import (
     ALL_PROFILES,
     PROFILE_BY_NAME,

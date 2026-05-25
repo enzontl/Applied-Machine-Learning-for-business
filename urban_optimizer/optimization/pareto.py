@@ -26,11 +26,10 @@ from urban_optimizer.utils.logging import get_logger
 
 from .mayor_profile import MayorProfile
 from .network_design import (
-    _evaluate_proposals,
     _generate_proposals,
     _greedy_select,
     _joint_re_evaluate,
-    _quick_fw_screen,
+    _marginal_evaluate,
 )
 from .score import score_network
 
@@ -107,11 +106,10 @@ def compute_pareto_frontier(
     )
     baseline_score = score_network(baseline_ue, profile, access=baseline_access)
 
-    # 2. Candidats — pool plus large pour screening, puis un seul appel d'éval pour toute la courbe
-    pool_size = max_fw_evals if screen_factor <= 1.0 else int(max_fw_evals * screen_factor)
+    # 2. Candidats
     pre = _generate_proposals(
         network, od, baseline_ue,
-        max_proposals=max_proposals, max_fw_evals=pool_size,
+        max_proposals=max_proposals, max_fw_evals=max_fw_evals,
         obstacle_index=obstacle_index, soft_index=soft_index,
         periphery_margin_m=periphery_margin_m,
     )
@@ -119,19 +117,11 @@ def compute_pareto_frontier(
         logger.warning("Pareto : aucun candidat — courbe vide.")
         return ParetoFrontier()
 
-    # 2b. Pré-filtre 1-iter FW (réduit aux max_fw_evals meilleurs)
-    if len(pre) > max_fw_evals:
-        pre = _quick_fw_screen(
-            network, od, baseline_ue, pre, max_fw_evals, n_jobs=n_jobs,
-        )
-
-    # 3. Évaluation individuelle — UNE SEULE FOIS (réutilisée pour tous les budgets)
-    evals = _evaluate_proposals(
-        network, od, profile, baseline_ue, baseline_score, pre,
-        fw_max_iter=fw_max_iter_cand, fw_tol=fw_tol_cand,
-        n_jobs=n_jobs,
-        baseline_access=baseline_access,
-    )
+    # 3. Évaluation marginale INSTANTANÉE (pas de FW par candidat)
+    evals = [
+        _marginal_evaluate(network, p, baseline_ue, baseline_score, profile)
+        for p in pre
+    ]
 
     # 4. Pour chaque budget : greedy + joint
     # Mémoïsation : si 2 budgets consécutifs sélectionnent les MÊMES interventions

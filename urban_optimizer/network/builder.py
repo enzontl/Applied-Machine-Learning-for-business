@@ -25,6 +25,23 @@ def _cache_key(city: str, include_route500: bool, simplified: bool) -> Path:
     return _CACHE_DIR / f"{slug}.pkl"
 
 
+def purge_old_caches() -> int:
+    """Supprime tous les .pkl dans le cache réseau.
+
+    Utile après un changement de version structurelle (ex: composante connexe).
+    Retourne le nombre de fichiers supprimés.
+    """
+    if not _CACHE_DIR.exists():
+        return 0
+    removed = 0
+    for f in _CACHE_DIR.glob("*.pkl"):
+        f.unlink()
+        removed += 1
+    if removed:
+        logger.info(f"Cache réseau purgé : {removed} fichier(s) supprimé(s)")
+    return removed
+
+
 def build_network(
     city: str,
     buffer_km: float = 10.0,

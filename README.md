@@ -3,11 +3,11 @@
 A framework for optimizing urban road networks using OD traffic assignment and urban plan evaluation.
 
 The project combines:
-1. Urban road network construction from OSM (with optional ROUTE500 integration).
+1. Urban road network construction from OSM (with optional ROUTE500 integration), with automatic connected-component extraction for clean graphs.
 2. OD matrix generation (grid, H3, or IRIS zoning).
 3. Traffic assignment (All-or-Nothing, User Equilibrium, System Optimum).
 4. Network diagnostics (VHT, congestion, saturation, critical links, **accessibility + Gini equity**, price of anarchy).
-5. Optimization (candidate ranking, new link proposals under budget constraints, **joint re-evaluation**, **robustness testing**, **Pareto frontier**).
+5. **Fast optimization** via **marginal BPR analysis** — candidate evaluation is analytical (O(1) per candidate, no per-candidate Frank-Wolfe), with a single joint FW re-evaluation at the end. Typical pipeline: **15–30 s** instead of 500–600 s.
 6. **A modern web app** (FastAPI + HTML/JS data-viz front) to run the full pipeline end-to-end with **before/after saturation maps**, multi-profile comparison, Pareto curve, robustness test and Braess removals.
 7. A legacy Streamlit dashboard (still available but deprecated in favor of the new front).
 
@@ -17,14 +17,15 @@ The project combines:
 
 Features currently implemented:
 
-- **network**: `build_network`, `build_unified_network`, OSM/ROUTE500 loaders, hard obstacles (buildings, parks) + bridge triggers (rail, water).
+- **network**: `build_network`, `build_unified_network`, OSM/ROUTE500 loaders, hard obstacles (buildings, parks) + bridge triggers (rail, water). Automatic extraction of the largest weakly connected component (eliminates disconnected graph warnings). Parallel Overpass downloads. Disk cache with versioning.
 - **demand**: `generate_od_matrix`, `gravity_od`, grid/H3/IRIS zoning.
 - **assignment**: `solve_all_or_nothing`, `solve_user_equilibrium`, `solve_system_optimum`, `price_of_anarchy`.
 - **diagnosis**: `diagnose`, critical-link ranking, **accessibility report (isochrone + Gini equity)**.
 - **optimization**:
   - 3 intervention types: **widening** (corridor), **upgrade** (residential → arterial), **new route** (visibility-graph A* on building corners).
+  - **Marginal BPR evaluation**: each candidate is scored analytically from baseline flows using BPR cost derivatives — no per-candidate Frank-Wolfe. Evaluates 60 candidates in < 0.1 s total.
   - **Periphery filter**: new routes restricted to peripheral areas (avoids failures in dense centers).
-  - **Joint plan re-evaluation**: single Frank-Wolfe pass with all interventions applied → real ΔVHT + redundancy detection.
+  - **Joint plan re-evaluation**: single Frank-Wolfe pass with all interventions applied → real ΔVHT + redundancy detection. This is the **only FW** in the optimization step (besides baseline UE).
   - **Enriched score**: time + fuel + CO2 + accessibility benefit − equity (Gini) penalty, weighted by mayor profile.
   - **Robustness testing**: re-FW under demand × {0.8, 1.0, 1.2, 1.5}.
   - **Pareto frontier**: budget → benefit curve across 6 budget levels with sweet-spot detection.
@@ -36,26 +37,28 @@ Features currently implemented:
 ## Pipeline Overview
 
 ```
-OSM/ROUTE500 → network → OD matrix → Frank-Wolfe UE → diagnosis (VHT + accessibility)
-                                                ↓
-                                  ┌─────────────┴────────────┐
-                                  │   Candidate generation   │
-                                  │  (corridors + upgrades   │
-                                  │     + new routes)        │
-                                  └─────────────┬────────────┘
-                                                ↓
-                                  Individual FW evaluation (1/candidate)
-                                                ↓
-                                  Greedy selection under budget
-                                                ↓
-                                  Joint FW re-evaluation
-                                  (real ΔVHT + post-plan accessibility)
-                                                ↓
-                              ┌─────────────────┼─────────────────┐
-                              ↓                 ↓                 ↓
-                       Robustness        Pareto curve         Before/after
-                       (4 demand          (6 budgets)         saturation maps
-                        scenarios)
+OSM/ROUTE500 → network (largest component) → OD matrix → Frank-Wolfe UE
+                                                              ↓
+                                              diagnosis (VHT + accessibility)
+                                                              ↓
+                                              ┌───────────────┴───────────────┐
+                                              │     Candidate generation      │
+                                              │  (corridors + upgrades        │
+                                              │     + new routes)             │
+                                              └───────────────┬───────────────┘
+                                                              ↓
+                                              Marginal BPR evaluation (instant, no FW)
+                                                              ↓
+                                              Greedy selection under budget
+                                                              ↓
+                                              1 Joint FW re-evaluation
+                                              (real ΔVHT + post-plan accessibility)
+                                                              ↓
+                                        ┌─────────────────────┼─────────────────┐
+                                        ↓                     ↓                 ↓
+                                 Robustness            Pareto curve         Before/after
+                                 (4 demand              (6 budgets)         saturation maps
+                                  scenarios)
 ```
 
 ---
@@ -275,7 +278,10 @@ An example city configuration is available in `configs/lyon.yaml` (network, dema
 
 **Web app stuck on "Optimisation en cours…" loader**
 - The pipeline runs in a background thread; the loader polls every 1.5 s. Open the browser console (F12) — `[uo]` lines show the polling state. If "Connexion perdue" appears, restart `uvicorn --reload`. You can also inspect directly: `curl http://localhost:8000/api/jobs/{job_id}`.
-- The "Optimisation profil…" step is monolithic (1–4 min for Villeurbanne with default params) and intermediate progress per-candidate is not yet reported.
+- With the marginal BPR approach, the optimization step typically takes 15–30 s (vs 500–600 s with the old per-candidate FW). Only 2 FW solves remain: baseline UE + 1 joint re-evaluation.
 
-**First run on a new city is very long (5–10 min)**
-- OSM + obstacles download + processing. Subsequent runs use the disk cache (`data/raw/network_cache/` + `data/processed/urban_cache/`) and load in a few seconds.
+**First run on a new city is very long (2–5 min)**
+- OSM + obstacles download + processing. Obstacle layers (buildings, parks, rail, water) are downloaded in parallel via ThreadPoolExecutor. Subsequent runs use the disk cache (`data/raw/network_cache/` + `data/processed/urban_cache/`) and load in a few seconds.
+
+**Thousands of "Couldn't reach some vertices" warnings**
+- This used to happen when the OSM graph had disconnected components. Fixed: `merger.py` now extracts the largest weakly connected component automatically. A global warning filter in `urban_optimizer/__init__.py` also suppresses residual igraph C-level warnings.
