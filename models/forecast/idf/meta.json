@@ -1,0 +1,36 @@
+{
+  "emission_features": [
+    "population"
+  ],
+  "attraction_features": [
+    "population",
+    "jobs"
+  ],
+  "metrics_emission": {
+    "target": "emission",
+    "n_samples": 123,
+    "mae": 1003.5406381228626,
+    "r2": 0.9587939670151122,
+    "mae_train": 997.3044576106249,
+    "r2_train": 0.9595054451942279,
+    "coefficients": {
+      "population": 0.26353785746508923
+    }
+  },
+  "metrics_attraction": {
+    "target": "attraction",
+    "n_samples": 123,
+    "mae": 729.8337911687679,
+    "r2": 0.9846105142443324,
+    "mae_train": 711.133645486066,
+    "r2_train": 0.9853878146197292,
+    "coefficients": {
+      "population": 2321.032779613059,
+      "jobs": 8301.035731901069
+    }
+  },
+  "training_target_total": {
+    "emission": 1243721.5897950046,
+    "attraction": 1243721.5897950046
+  }
+}

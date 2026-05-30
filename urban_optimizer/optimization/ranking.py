@@ -194,31 +194,3 @@ def rank_candidates(
         )
     evals.sort(key=lambda e: e.bcr, reverse=True)
     return evals
-
-
-def select_under_budget(
-    evals: list[CandidateEvaluation],
-    budget_eur: float,
-    *,
-    one_per_edge: bool = True,
-) -> list[CandidateEvaluation]:
-    """Sélection gloutonne sous contrainte budgétaire (sac à dos relaxé).
-
-    Si ``one_per_edge``, on retient au plus une action par arc — pour éviter de
-    proposer "boost capa +20%" ET "boost capa +50%" sur le même arc.
-    """
-    sorted_evals = sorted(evals, key=lambda e: e.bcr, reverse=True)
-    chosen: list[CandidateEvaluation] = []
-    spent = 0.0
-    seen_edges: set[int] = set()
-    for ev in sorted_evals:
-        if ev.annual_benefit_eur <= 0:
-            continue
-        if one_per_edge and ev.candidate.edge_id in seen_edges:
-            continue
-        if spent + ev.cost_eur > budget_eur:
-            continue
-        chosen.append(ev)
-        spent += ev.cost_eur
-        seen_edges.add(ev.candidate.edge_id)
-    return chosen

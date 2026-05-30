@@ -107,7 +107,7 @@ function renderProfiles(profiles) {
 
 function bindParamSliders() {
   const bindings = [
-    ["p-budget", "v-budget", (v) => `${v} M€`],
+    ["p-horizon", "v-horizon", (v) => `${v} ans`],
     ["p-hour", "v-hour", (v) => `${v} h`],
     ["p-cells", "v-cells", (v) => `${v} cellules`],
     ["p-scale", "v-scale", (v) => `${(v / 10).toFixed(1)}×`],
@@ -166,7 +166,7 @@ function bindRunButton() {
       hour: parseInt(slider("p-hour", "8"), 10),
       n_cells: parseInt(slider("p-cells", "10"), 10),
       scale_factor: parseInt(slider("p-scale", "3"), 10) / 10,
-      budget_meur: parseFloat(slider("p-budget", "50")),
+      horizon_years: parseInt(slider("p-horizon", "10"), 10),
       max_candidates: parseInt(slider("p-cand", "30"), 10),
       max_fw_evals: parseInt(slider("p-fw", "10"), 10),
       periphery_margin_m: parseFloat(slider("p-periph", "600")),
@@ -320,21 +320,21 @@ function renderDashboard(data) {
   if (main) {
     document.getElementById("d-profile").textContent = main.profile_label;
   }
-  document.getElementById("d-budget").textContent = "—";
-
-  // Baseline détaillé (score actuel de la ville)
-  if (data.baseline) {
-    renderBaseline(data.baseline);
+  // Budget + horizon (calculés automatiquement)
+  const bdg = data.budget;
+  if (bdg) {
+    const src = bdg.source === "OFGL" ? "OFGL" : "estimé pop";
+    document.getElementById("d-budget").textContent =
+      `${(bdg.total_eur / 1e6).toFixed(1)} M€ (${src}, ${data.horizon_years} ans)`;
+  } else {
+    document.getElementById("d-budget").textContent = "—";
   }
+
+  // Synthèse long-terme
+  renderForecastFrame(data);
 
   // KPIs principaux (effet du plan)
   renderKpis(main.kpis);
-
-  // Re-évaluation jointe (ΔVHT naïf vs joint, redondance, verdict équité)
-  if (data.joint) {
-    renderJoint(data.joint, main);
-    document.getElementById("joint-block").classList.remove("hidden");
-  }
 
   // Carte (avec Braess geojson optionnel)
   initMap(data.network_geojson, data.plan_geojson, data.braess_geojson);
@@ -375,34 +375,38 @@ function renderDashboard(data) {
   bindMapToggle();
 }
 
-/* ─── Baseline (score actuel de la ville) ────────────────────────────── */
+/* ─── Cadre long-terme : horizon + projection ML + budget OFGL ──────── */
 
-function renderBaseline(b) {
-  const container = document.getElementById("kpis-baseline");
+function renderForecastFrame(data) {
+  const block = document.getElementById("forecast-block");
+  const container = document.getElementById("kpis-forecast");
+  if (!container || !block) return;
   container.innerHTML = "";
-  const cards = [
-    { label: "Coût social annuel", value: fmtEur(b.annual_total_eur), delta: "pondéré profil", accent: "neutral" },
-    { label: "Coût temps", value: fmtEur(b.annual_time_eur), accent: "neutral" },
-    { label: "Coût carburant", value: fmtEur(b.annual_fuel_eur), accent: "neutral" },
-    {
-      label: "Émissions CO2",
-      value: `${fmtNumber(b.annual_co2_kg / 1000, { maximumFractionDigits: 0 })} t/an`,
-      delta: `${fmtEur(b.annual_co2_eur)} externalité`,
-      accent: "neutral",
-    },
-    {
-      label: "Accessibilité moyenne",
-      value: `${b.accessibility_mean.toFixed(1)} zones`,
-      delta: "joignables (isochrone)",
-      accent: "neutral",
-    },
-    {
-      label: "Équité (Gini)",
-      value: b.accessibility_gini.toFixed(3),
-      delta: "0 = égalité parfaite",
-      accent: "neutral",
-    },
-  ];
+  const cards = [];
+  const horizon = data.horizon_years || 0;
+  cards.push({
+    label: "Horizon",
+    value: `${horizon} ans`,
+    delta: "planification retenue",
+    accent: "neutral",
+  });
+  const bdg = data.budget;
+  if (bdg) {
+    const sourceLabel = bdg.source === "OFGL"
+      ? `OFGL · ${bdg.annual_voirie_eur ? (bdg.annual_voirie_eur / 1e6).toFixed(1) + " M€/an voirie" : ""}`
+      : `estimé pop · ${bdg.annual_voirie_eur ? (bdg.annual_voirie_eur / 1e6).toFixed(1) + " M€/an" : ""}`;
+    cards.push({
+      label: "Budget travaux cumulé",
+      value: fmtEur(bdg.total_eur),
+      delta: sourceLabel,
+      accent: "good",
+    });
+  }
+  if (cards.length === 0) {
+    block.classList.add("hidden");
+    return;
+  }
+  block.classList.remove("hidden");
   cards.forEach(k => {
     const div = document.createElement("div");
     div.className = `kpi ${k.accent || "neutral"}`;
@@ -413,90 +417,6 @@ function renderBaseline(b) {
     `;
     container.appendChild(div);
   });
-}
-
-/* ─── Re-évaluation jointe + verdict équité ──────────────────────────── */
-
-function renderJoint(j, main) {
-  const container = document.getElementById("kpis-joint");
-  container.innerHTML = "";
-
-  const dvhtJoint = j.joint_delta_vht_h;
-  const dvhtNaive = j.naive_sum_delta_vht_h;
-  const redundancy = j.redundancy_pct;
-
-  const cards = [
-    {
-      label: "ΔVHT joint (réel)",
-      value: `${dvhtJoint >= 0 ? "−" : "+"}${fmtNumber(Math.abs(dvhtJoint), { maximumFractionDigits: 1 })} h`,
-      delta: "FW unique avec toutes les interventions actives",
-      accent: dvhtJoint > 0 ? "good" : "neutral",
-    },
-    {
-      label: "ΔVHT somme naïve",
-      value: `${dvhtNaive >= 0 ? "−" : "+"}${fmtNumber(Math.abs(dvhtNaive), { maximumFractionDigits: 1 })} h`,
-      delta: "somme des effets individuels (overestime)",
-      accent: "neutral",
-    },
-    {
-      label: "Redondance",
-      value: `${redundancy.toFixed(0)} %`,
-      delta: "part du gain naïf cannibalisée",
-      accent: redundancy > 25 ? "warning" : (redundancy > 10 ? "neutral" : "good"),
-    },
-    {
-      label: "BCR joint",
-      value: j.joint_bcr.toFixed(2),
-      delta: "bénéfice annuel ÷ CAPEX",
-      accent: j.joint_bcr > 1 ? "good" : "warning",
-    },
-    {
-      label: "Accessibilité après",
-      value: `${j.accessibility_after.toFixed(1)} zones`,
-      delta: `${(j.accessibility_after - j.accessibility_before >= 0 ? "+" : "")}${(j.accessibility_after - j.accessibility_before).toFixed(2)} vs ${j.accessibility_before.toFixed(1)}`,
-      accent: j.accessibility_after - j.accessibility_before > 0.01 ? "good" : "neutral",
-    },
-    {
-      label: "Gini après",
-      value: j.gini_after.toFixed(3),
-      delta: `${(j.gini_after - j.gini_before >= 0 ? "+" : "")}${(j.gini_after - j.gini_before).toFixed(3)} vs ${j.gini_before.toFixed(3)}`,
-      accent: j.gini_after - j.gini_before < -0.01 ? "good" : (j.gini_after - j.gini_before > 0.01 ? "warning" : "neutral"),
-    },
-  ];
-  cards.forEach(k => {
-    const div = document.createElement("div");
-    div.className = `kpi ${k.accent || "neutral"}`;
-    div.innerHTML = `
-      <div class="label">${k.label}</div>
-      <div class="value">${k.value}</div>
-      ${k.delta ? `<div class="delta">${k.delta}</div>` : ""}
-    `;
-    container.appendChild(div);
-  });
-
-  // Warning redondance
-  const warn = document.getElementById("joint-warning");
-  if (redundancy > 25) {
-    warn.classList.remove("hidden");
-    warn.innerHTML = `⚠ Redondance élevée (${redundancy.toFixed(0)}%) : plusieurs interventions se cannibalisent. Envisager d'en retirer pour libérer du budget.`;
-  } else {
-    warn.classList.add("hidden");
-  }
-
-  // Verdict équité
-  const verdict = document.getElementById("equity-verdict");
-  const dgini = j.gini_after - j.gini_before;
-  verdict.classList.remove("hidden", "alert-good", "alert-warning", "alert-info");
-  if (dgini < -0.01) {
-    verdict.classList.add("alert-good");
-    verdict.innerHTML = "✓ Plan plutôt <strong>égalitaire</strong> — l'équité d'accès s'améliore.";
-  } else if (dgini > 0.01) {
-    verdict.classList.add("alert-warning");
-    verdict.innerHTML = "⚠ Plan <strong>inégalitaire</strong> — les zones déjà bien desservies gagnent plus que les autres.";
-  } else {
-    verdict.classList.add("alert-info");
-    verdict.innerHTML = "≈ Effet <strong>neutre</strong> sur l'équité d'accès.";
-  }
 }
 
 /* ─── Braess ─────────────────────────────────────────────────────────── */
@@ -874,4 +794,3 @@ function switchMapMode(mode) {
   }
   CURRENT_MODE = mode;
 }
-

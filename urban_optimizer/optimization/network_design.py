@@ -40,10 +40,7 @@ from urban_optimizer.demand.od_matrix import ODMatrix
 from shapely.strtree import STRtree as _STRtree
 from shapely.geometry import Point as _Point
 
-from urban_optimizer.network.buildings import ObstacleIndex
-
-# Alias de rétrocompatibilité pour les tests qui importent BuildingIndex directement
-BuildingIndex = ObstacleIndex
+from urban_optimizer.network.buildings import BuildingIndex, ObstacleIndex
 from urban_optimizer.network.urban_network import UrbanNetwork
 from urban_optimizer.diagnosis.accessibility import compute_accessibility
 from urban_optimizer.utils.logging import get_logger
@@ -160,6 +157,10 @@ class JointPlanResult:
     # Coefficient de Gini avant / après (0 = parfaite équité)
     gini_before: float = 0.0
     gini_after: float = 0.0
+    # Induced demand (rebound effect)
+    induced_iter: int = 0                    # nb d'itérations FW-induced (0 = désactivé)
+    induced_trip_share: float = 0.0          # (T_final - T_baseline) / T_baseline
+    induced_elasticity: float = 0.0          # ε utilisé (0 si désactivé)
 
     @property
     def redundancy_factor(self) -> float:
@@ -1354,22 +1355,67 @@ def _joint_re_evaluate(
     fw_max_iter: int,
     fw_tol: float,
     accessibility_threshold_s: float,
+    enable_induced_demand: bool = False,
+    induced_elasticity: float = -0.6,
+    induced_max_iter: int = 3,
+    induced_tol: float = 0.01,
 ) -> JointPlanResult | None:
-    """Évaluation jointe : FW unique avec toutes les interventions appliquées."""
+    """Évaluation jointe : FW (+ boucle induced demand optionnelle).
+
+    Si ``enable_induced_demand`` :
+        1. FW joint sur ``od`` (demande baseline).
+        2. Calcule un OD ajusté par élasticité (réf. demand/induced.py).
+        3. Re-FW joint sur OD ajusté.
+        4. Itère jusqu'à convergence du VHT (|ΔVHT|/VHT < induced_tol) ou
+           ``induced_max_iter``.
+    Le score final est calculé sur le **dernier** UE atteint (et l'OD induit
+    correspondant), donc reflète l'équilibre demande↔congestion.
+    """
     if not chosen:
         return None
+    from urban_optimizer.demand.induced import apply_induced_demand
+
     chosen_props = [e.proposal for e in chosen]
     naive_sum_dvht = sum(e.delta_vht_h for e in chosen)
     naive_sum_benef = sum(e.annual_benefit_eur for e in chosen)
     n_existing_pre = network.graph.ecount()
+    base_total_trips = od.total_trips
+
     with _JointContext(network.graph, chosen_props):
         warm = _warm_start_flows(baseline_ue.flows, network.graph.ecount())
+
+        # --- Boucle FW-induced ---
+        cur_od = od
         joint_ue = solve_user_equilibrium(
-            network, od, max_iter=fw_max_iter, tol=fw_tol, initial_flows=warm,
+            network, cur_od, max_iter=fw_max_iter, tol=fw_tol, initial_flows=warm,
         )
+        induced_iter = 0
+        if enable_induced_demand:
+            prev_vht = joint_ue.vht
+            for k in range(induced_max_iter):
+                cur_od, ind_stats = apply_induced_demand(
+                    cur_od, network, baseline_ue, joint_ue,
+                    elasticity=induced_elasticity,
+                )
+                logger.info(f"  [induced iter {k+1}] {ind_stats.summary()}")
+                joint_ue = solve_user_equilibrium(
+                    network, cur_od, max_iter=fw_max_iter, tol=fw_tol,
+                    initial_flows=joint_ue.flows,
+                )
+                induced_iter = k + 1
+                rel = abs(joint_ue.vht - prev_vht) / max(prev_vht, 1.0)
+                if rel < induced_tol:
+                    logger.info(
+                        f"  [induced] convergé en {induced_iter} itération(s) "
+                        f"(|ΔVHT|/VHT = {rel*100:.2f}% < {induced_tol*100:.1f}%)"
+                    )
+                    break
+                prev_vht = joint_ue.vht
+        # --- Fin boucle ---
+
         caps_after = np.asarray(network.graph.es["capacity"], dtype=float)
         joint_access = compute_accessibility(
-            network, od, joint_ue, threshold_seconds=accessibility_threshold_s,
+            network, cur_od, joint_ue, threshold_seconds=accessibility_threshold_s,
         )
     sat_existing_after = (
         joint_ue.flows[:n_existing_pre]
@@ -1379,6 +1425,10 @@ def _joint_re_evaluate(
     joint_dvht = baseline_ue.vht - joint_ue.vht
     joint_benef = baseline_score.total_annual_cost_eur - joint_score.total_annual_cost_eur
     joint_bcr = joint_benef / spent if spent > 0 else 0.0
+    induced_share = (
+        (cur_od.total_trips - base_total_trips) / base_total_trips
+        if base_total_trips > 0 else 0.0
+    )
     return JointPlanResult(
         n_interventions=len(chosen),
         joint_vht_h=joint_ue.vht,
@@ -1394,6 +1444,9 @@ def _joint_re_evaluate(
         accessibility_after=joint_access.mean_reachable,
         gini_before=baseline_gini,
         gini_after=joint_access.gini,
+        induced_iter=induced_iter,
+        induced_trip_share=induced_share,
+        induced_elasticity=induced_elasticity if enable_induced_demand else 0.0,
     )
 
 
@@ -1410,30 +1463,74 @@ def propose_urban_plan(
     max_fw_evals: int = 15,
     fw_max_iter: int = 15,
     fw_tol: float = 5e-3,
-    fw_max_iter_cand: int = 5,      # ignoré (rétrocompat)
-    fw_tol_cand: float = 2e-2,      # ignoré (rétrocompat)
-    n_jobs: int = -1,               # ignoré (rétrocompat)
-    screen_factor: float = 1.5,     # ignoré (rétrocompat)
-    building_index: ObstacleIndex | None = None,
     obstacle_index: ObstacleIndex | None = None,
     soft_index: ObstacleIndex | None = None,
     periphery_margin_m: float = 600.0,
     accessibility_threshold_s: float = 15 * 60,
+    selection_method: str = "knapsack",  # "greedy" | "knapsack"
+    enable_2swap: bool = True,
+    swap_max_iter: int = 3,
+    swap_top_k_out: int = 3,
+    swap_top_k_in: int = 5,
+    swap_max_fw_calls: int = 12,
+    enable_induced_demand: bool = False,
+    induced_elasticity: float = -0.6,
+    induced_max_iter: int = 3,
+    induced_tol: float = 0.01,
+    forecast_model=None,                  # FlowForecastModel | None
+    forecast_features=None,               # pd.DataFrame (features par commune)
+    forecast_omphale=None,                # pd.DataFrame OMPHALE | None
+    forecast_iris_to_commune=None,        # dict[str, str] | None
+    forecast_horizon_years: int = 0,      # 0 = pas de projection
     _baseline_access=None,
 ) -> tuple[list[NewArcEvaluation], CityScore, JointPlanResult | None]:
-    """Pipeline rapide : évaluation marginale + 1 seul FW joint final.
+    """Pipeline rapide : évaluation marginale + sélection + FW joint final.
 
     1. Génère des candidats (corridors, upgrades, nouvelles routes).
     2. Évalue chaque candidat par **analyse marginale BPR** (O(1), pas de FW).
-    3. Sélection gloutonne sous budget.
-    4. UN SEUL FW final avec toutes les interventions appliquées simultanément.
+    3. Sélection sous budget : ``"knapsack"`` (DP 0/1 exact, défaut) ou
+       ``"greedy"`` (BCR décroissant, historique).
+    4. Optionnel — ``enable_2swap`` : post-traitement local-search 2-swap qui
+       rejoue le FW joint pour casser les redondances entre interventions
+       parallèles (ex. deux corridors quasi-parallèles qui se cannibalisent).
+    5. FW joint final avec toutes les interventions appliquées simultanément.
 
     L'évaluation marginale capture 80-90% de l'effet réel en < 0.01s par candidat
     (vs ~20-30s pour un FW complet). Le FW joint final donne le vrai ΔVHT.
+
+    Si ``forecast_horizon_years > 0`` et ``forecast_model`` est fourni, l'OD
+    est d'abord projetée à l'horizon H (via le module forecast) et tout le
+    pipeline (baseline UE, candidats, FW joints) s'appuie sur cette OD
+    future. Les travaux proposés sont donc dimensionnés pour la demande
+    attendue dans 5-10 ans, pas pour celle d'aujourd'hui.
     """
+    from .selection import knapsack_dp_select, local_search_2swap
     import time as _time
     _t0 = _time.perf_counter()
-    _obs = obstacle_index or building_index
+    _obs = obstacle_index
+
+    # ── Projection horizon (optionnelle) ──
+    if forecast_horizon_years > 0 and forecast_model is not None:
+        from urban_optimizer.forecast import project_od_future
+        if forecast_features is None or forecast_iris_to_commune is None:
+            raise ValueError(
+                "forecast_horizon_years > 0 requiert forecast_features et "
+                "forecast_iris_to_commune."
+            )
+        import pandas as _pd
+        omphale = forecast_omphale if forecast_omphale is not None else _pd.DataFrame()
+        od_proj, proj_stats = project_od_future(
+            od, forecast_model, forecast_features, omphale,
+            forecast_iris_to_commune,
+            horizon_years=forecast_horizon_years,
+        )
+        logger.info(f"NDP — {proj_stats.summary()}")
+        # On bascule sur l'OD future + on re-solve l'UE baseline dessus
+        od = od_proj
+        baseline_ue = solve_user_equilibrium(
+            network, od, max_iter=fw_max_iter, tol=fw_tol,
+        )
+        _baseline_access = None  # invalidé car OD a changé
 
     baseline_access = _baseline_access or compute_accessibility(
         network, od, baseline_ue, threshold_seconds=accessibility_threshold_s,
@@ -1477,29 +1574,78 @@ def propose_urban_plan(
         )
     logger.info(f"  Évaluation marginale terminée en {_time.perf_counter() - _t1:.2f}s")
 
-    # 3. Sélection gloutonne sous budget
-    chosen, spent = _greedy_select(evals, budget_eur)
+    # 3. Sélection sous budget (knapsack DP ou greedy)
+    if selection_method == "knapsack":
+        chosen, spent = knapsack_dp_select(evals, budget_eur)
+    elif selection_method == "greedy":
+        chosen, spent = _greedy_select(evals, budget_eur)
+    else:
+        raise ValueError(
+            f"selection_method inconnue : {selection_method!r} "
+            f"(attendu : 'knapsack' ou 'greedy')"
+        )
     cnt = {t: sum(e.proposal.proposal_type == t for e in chosen)
            for t in ("corridor", "upgrade", "new_route")}
     logger.info(
-        f"NDP — {len(chosen)} retenues "
+        f"NDP — sélection [{selection_method}] : {len(chosen)} retenues "
         f"({cnt['corridor']} corridors + {cnt['upgrade']} upgrades + "
         f"{cnt['new_route']} routes), coût = {spent:,.0f}€ / {budget_eur:,.0f}€"
     )
 
-    # 4. UN SEUL FW joint final (le seul FW du pipeline, hors baseline)
-    joint = _joint_re_evaluate(
-        network, od, profile, baseline_ue, baseline_score,
-        baseline_access.mean_reachable, baseline_access.gini,
-        chosen, spent,
-        fw_max_iter=fw_max_iter, fw_tol=fw_tol,
-        accessibility_threshold_s=accessibility_threshold_s,
-    )
-    if joint is not None:
+    # 4. Optionnel : local-search 2-swap (FW joint à chaque essai)
+    joint: JointPlanResult | None
+    if enable_2swap and chosen:
+        def _joint_fn(plan: list[NewArcEvaluation], plan_spent: float):
+            return _joint_re_evaluate(
+                network, od, profile, baseline_ue, baseline_score,
+                baseline_access.mean_reachable, baseline_access.gini,
+                plan, plan_spent,
+                fw_max_iter=fw_max_iter, fw_tol=fw_tol,
+                accessibility_threshold_s=accessibility_threshold_s,
+                enable_induced_demand=enable_induced_demand,
+                induced_elasticity=induced_elasticity,
+                induced_max_iter=induced_max_iter,
+                induced_tol=induced_tol,
+            )
+
+        chosen, spent, joint, fw_calls = local_search_2swap(
+            chosen, evals, spent, budget_eur,
+            joint_eval_fn=_joint_fn,
+            max_iter=swap_max_iter,
+            top_k_out=swap_top_k_out,
+            top_k_in=swap_top_k_in,
+            max_fw_calls=swap_max_fw_calls,
+        )
+        cnt = {t: sum(e.proposal.proposal_type == t for e in chosen)
+               for t in ("corridor", "upgrade", "new_route")}
         logger.info(
-            f"NDP — FW joint : ΔVHT={joint.joint_delta_vht_h:+.1f}h, "
+            f"NDP — après 2-swap ({fw_calls} FW joints) : {len(chosen)} retenues "
+            f"({cnt['corridor']} corridors + {cnt['upgrade']} upgrades + "
+            f"{cnt['new_route']} routes), coût = {spent:,.0f}€"
+        )
+    else:
+        # FW joint unique (comportement historique)
+        joint = _joint_re_evaluate(
+            network, od, profile, baseline_ue, baseline_score,
+            baseline_access.mean_reachable, baseline_access.gini,
+            chosen, spent,
+            fw_max_iter=fw_max_iter, fw_tol=fw_tol,
+            accessibility_threshold_s=accessibility_threshold_s,
+            enable_induced_demand=enable_induced_demand,
+            induced_elasticity=induced_elasticity,
+            induced_max_iter=induced_max_iter,
+            induced_tol=induced_tol,
+        )
+
+    if joint is not None:
+        msg_induced = (
+            f", induced {joint.induced_trip_share*100:+.2f}% en {joint.induced_iter}it."
+            if joint.induced_iter > 0 else ""
+        )
+        logger.info(
+            f"NDP — FW joint final : ΔVHT={joint.joint_delta_vht_h:+.1f}h, "
             f"bénéfice = {joint.joint_annual_benefit_eur:+,.0f}€/an, "
-            f"BCR = {joint.joint_bcr:.2f} "
+            f"BCR = {joint.joint_bcr:.2f}{msg_induced} "
             f"(total {_time.perf_counter() - _t0:.1f}s)"
         )
 

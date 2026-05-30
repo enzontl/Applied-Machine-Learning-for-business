@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from math import isfinite
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -33,7 +34,22 @@ from urban_optimizer.optimization import (
     score_network,
 )
 
+from .forecast_integration import compute_budget, project_od_if_eligible
 from .jobs import JobState
+
+# Trouver l'insee de la ville depuis PRESET_CITIES (lazy import pour éviter cycle)
+def _lookup_insee_population(city_osm: str) -> tuple[str | None, float | None]:
+    from .main import PRESET_CITIES
+    for c in PRESET_CITIES:
+        if c["osm"] == city_osm:
+            return c.get("insee"), float(c.get("population", 0)) or None
+    return None, None
+
+
+# Chemin par défaut du modèle forecast (résolu dans api/main.py)
+FORECAST_MODEL_PATH = str(
+    Path(__file__).resolve().parent.parent / "models" / "forecast" / "idf"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +112,7 @@ def _interventions_payload(plan: list) -> list[dict]:
 
 
 def _baseline_payload(baseline_score, baseline_access, ue, net, od) -> dict:
-    """Décomposition du baseline pour affichage (équivalent des KPIs Score actuel du streamlit)."""
+    """Décomposition du baseline pour le bloc 'Score actuel' du dashboard."""
     from urban_optimizer.diagnosis import diagnose
     diag = diagnose(net, ue)
     return {
@@ -123,7 +139,7 @@ def _baseline_payload(baseline_score, baseline_access, ue, net, od) -> dict:
 
 
 def _joint_payload(joint) -> dict | None:
-    """Détail re-évaluation jointe (équivalent du bloc 'Re-évaluation jointe' du streamlit)."""
+    """Détail re-évaluation jointe pour le bloc dashboard correspondant."""
     if joint is None:
         return None
     redundancy_pct = (1.0 - joint.redundancy_factor) * 100
@@ -151,30 +167,28 @@ def _kpis_for_profile(
     joint,
     plan_count: int,
     capex_total: float,
-    baseline_access,
-    sat_before: np.ndarray,
 ) -> list[dict]:
     """Construit la liste de KPIs à afficher en cards en haut du dashboard."""
-    saturated_before = int((sat_before >= 0.9).sum())
-
     if joint is not None:
         joint_score_total = baseline_score.total_annual_cost_eur - joint.joint_annual_benefit_eur
         delta_score = joint.joint_annual_benefit_eur
         delta_vht = joint.joint_delta_vht_h
-        delta_access = joint.accessibility_after - joint.accessibility_before
-        delta_gini = joint.gini_after - joint.gini_before
     else:
         joint_score_total = baseline_score.total_annual_cost_eur
         delta_score = 0.0
         delta_vht = 0.0
-        delta_access = 0.0
-        delta_gini = 0.0
 
     return [
         {
-            "label": "Coût social annuel (après plan)",
+            "label": "Coût annuel après plan",
             "value": _format_eur(joint_score_total),
-            "delta": f"−{_format_eur(delta_score)}/an" if delta_score > 0 else None,
+            "delta": f"gain annuel {_format_eur(delta_score)}/an" if delta_score > 0 else None,
+            "accent": "good" if delta_score > 0 else "neutral",
+        },
+        {
+            "label": "Gain annuel estimé",
+            "value": _format_eur(delta_score),
+            "delta": "bénéfice social net",
             "accent": "good" if delta_score > 0 else "neutral",
         },
         {
@@ -187,18 +201,6 @@ def _kpis_for_profile(
             "value": str(plan_count),
             "delta": f"{_format_eur(capex_total)} CAPEX" if capex_total > 0 else None,
             "accent": "neutral",
-        },
-        {
-            "label": f"Accessibilité moyenne",
-            "value": f"{baseline_access.mean_reachable + delta_access:.1f} zones",
-            "delta": (f"{delta_access:+.2f} vs avant"),
-            "accent": "good" if delta_access > 0.01 else ("warning" if delta_access < -0.01 else "neutral"),
-        },
-        {
-            "label": "Équité (Gini)",
-            "value": f"{baseline_access.gini + delta_gini:.3f}",
-            "delta": (f"{delta_gini:+.3f} vs avant"),
-            "accent": "good" if delta_gini < -0.01 else ("warning" if delta_gini > 0.01 else "neutral"),
         },
     ]
 
@@ -368,60 +370,24 @@ def _plan_geojson(plan: list, net) -> dict:
 
 
 def _adaptive_params(n_edges: int, req_dict: dict[str, Any]) -> dict[str, Any]:
-    """Ajuste automatiquement les hyper-paramètres selon la taille du graphe.
-
-    IMPORTANT — la tolérance candidat (fw_tol_cand) ne doit JAMAIS dépasser 3e-2.
-    Une intervention typique produit ΔVHT de 1-3 % du VHT baseline. Si la tolérance
-    FW est plus grande, le bruit du solveur noie le signal et TOUT semble "ΔVHT ≈ 0"
-    → aucune intervention retenue.
-
-    Petite ville (<5k arcs)  : paramètres bruts de la requête.
-    Moyenne (5k–15k)         : réduction modérée.
-    Grande (>15k)            : réduction agressive (moins de candidats, pas de tolérance folle).
-    """
-    params: dict[str, Any] = {}
-
+    """Ajuste les hyper-paramètres FW selon la taille du graphe."""
+    # (cap_ue, fw_iter, fw_evals_max, cand_max, rob_iter, rob_tol, label)
     if n_edges > 15_000:
-        # Grande ville (Lyon non simplifié, ~30k arcs)
-        params["max_iter_ue"] = min(int(req_dict.get("max_iter_ue", 50)), 30)
-        params["fw_max_iter"] = 10
-        params["fw_max_iter_cand"] = 5
-        params["fw_tol"] = 5e-3
-        params["fw_tol_cand"] = 2e-2        # ← JAMAIS > 3e-2 sinon signal noyé
-        params["max_fw_evals"] = min(int(req_dict.get("max_fw_evals", 8)), 5)
-        params["max_candidates"] = min(int(req_dict.get("max_candidates", 20)), 12)
-        params["screen_factor"] = 1.3
-        params["rob_max_iter"] = 8
-        params["rob_tol"] = 1e-2
-        logger.info(f"Adaptive params: GRANDE ville ({n_edges} arcs) — candidats réduits")
+        cap_ue, fw_iter, fw_max, cand_max, rob_i, rob_tol, label = 30, 10, 5, 12, 8, 1e-2, "GRANDE"
     elif n_edges > 5_000:
-        # Ville moyenne
-        params["max_iter_ue"] = min(int(req_dict.get("max_iter_ue", 50)), 40)
-        params["fw_max_iter"] = 12
-        params["fw_max_iter_cand"] = 5
-        params["fw_tol"] = 5e-3
-        params["fw_tol_cand"] = 2e-2        # ← JAMAIS > 3e-2
-        params["max_fw_evals"] = min(int(req_dict.get("max_fw_evals", 8)), 7)
-        params["max_candidates"] = min(int(req_dict.get("max_candidates", 20)), 15)
-        params["screen_factor"] = 1.4
-        params["rob_max_iter"] = 10
-        params["rob_tol"] = 8e-3
-        logger.info(f"Adaptive params: ville MOYENNE ({n_edges} arcs)")
+        cap_ue, fw_iter, fw_max, cand_max, rob_i, rob_tol, label = 40, 12, 7, 15, 10, 8e-3, "MOYENNE"
     else:
-        # Petite ville — paramètres utilisateur
-        params["max_iter_ue"] = int(req_dict.get("max_iter_ue", 50))
-        params["fw_max_iter"] = 15
-        params["fw_max_iter_cand"] = 5
-        params["fw_tol"] = 5e-3
-        params["fw_tol_cand"] = 2e-2        # ← JAMAIS > 3e-2
-        params["max_fw_evals"] = int(req_dict.get("max_fw_evals", 8))
-        params["max_candidates"] = int(req_dict.get("max_candidates", 20))
-        params["screen_factor"] = 1.5
-        params["rob_max_iter"] = 15
-        params["rob_tol"] = 5e-3
-        logger.info(f"Adaptive params: PETITE ville ({n_edges} arcs) — paramètres bruts")
-
-    return params
+        cap_ue, fw_iter, fw_max, cand_max, rob_i, rob_tol, label = 999, 15, 999, 999, 15, 5e-3, "PETITE"
+    logger.info(f"Adaptive params: ville {label} ({n_edges} arcs)")
+    return {
+        "max_iter_ue": min(int(req_dict.get("max_iter_ue", 50)), cap_ue),
+        "fw_max_iter": fw_iter,
+        "fw_tol": 5e-3,
+        "max_fw_evals": min(int(req_dict.get("max_fw_evals", 8)), fw_max),
+        "max_candidates": min(int(req_dict.get("max_candidates", 20)), cand_max),
+        "rob_max_iter": rob_i,
+        "rob_tol": rob_tol,
+    }
 
 
 def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
@@ -479,6 +445,32 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             scale_factor=req_dict["scale_factor"],
         )
         logger.info(f"⏱ generate_od : {_time.perf_counter() - _t:.1f}s")
+
+        # ── Projection ML à l'horizon (si éligible) ──────────────────────
+        insee_code, city_pop = _lookup_insee_population(city)
+        horizon_years = int(req_dict.get("horizon_years", 0))
+        projection_payload = None
+        if horizon_years > 0:
+            job.update(
+                progress=0.15,
+                step=f"Projection demande horizon H+{horizon_years}…",
+            )
+            _t = _step_timer("project_od")
+            od, projection_payload = project_od_if_eligible(
+                od, insee_code=insee_code, horizon_years=horizon_years,
+                model_path=FORECAST_MODEL_PATH,
+            )
+            logger.info(f"⏱ project_od : {_time.perf_counter() - _t:.1f}s "
+                        f"(projected={projection_payload is not None})")
+
+        # ── Budget automatique (OFGL si IDF, sinon heuristique pop) ──────
+        budget_payload = compute_budget(
+            insee_code=insee_code, population=city_pop,
+            horizon_years=horizon_years,
+        )
+        budget_eur = budget_payload["total_eur"]
+        logger.info(f"Budget {budget_payload['source']} = {budget_eur/1e6:.1f} M€ "
+                    f"sur {budget_payload['horizon_years']} ans")
 
         max_iter_ue = ap["max_iter_ue"]
         job.update(progress=0.20, step=f"Affectation Frank-Wolfe ({max_iter_ue} itérations)…")
@@ -539,16 +531,15 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             _t = _step_timer(f"propose_urban_plan[{prof_name}]")
             plan, baseline_score, joint = propose_urban_plan(
                 net, od, profile, ue,
-                budget_eur=req_dict["budget_meur"] * 1e6,
+                budget_eur=budget_eur,
                 max_proposals=ap["max_candidates"],
                 max_fw_evals=ap["max_fw_evals"],
                 fw_max_iter=ap["fw_max_iter"], fw_tol=ap["fw_tol"],
-                fw_max_iter_cand=ap["fw_max_iter_cand"], fw_tol_cand=ap["fw_tol_cand"],
-                screen_factor=ap["screen_factor"],
                 obstacle_index=obstacles,
                 soft_index=bridges,
                 periphery_margin_m=float(req_dict["periphery_margin_m"]),
                 accessibility_threshold_s=access_thresh_s,
+                enable_induced_demand=(horizon_years > 0),  # rebond activé si projection
                 _baseline_access=baseline_access,
             )
             logger.info(f"⏱ propose_urban_plan[{prof_name}] : {_time.perf_counter() - _t:.1f}s → {len(plan)} interventions")
@@ -566,7 +557,7 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
                 "profile_label": profile.label,
                 "kpis": _kpis_for_profile(
                     profile.label, baseline_score, joint, len(plan),
-                    capex_total, baseline_access, sat_before,
+                    capex_total,
                 ),
                 "interventions": _interventions_payload(plan),
                 "baseline_vht_h": float(ue.vht),
@@ -633,14 +624,15 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
                 progress=analyses_base + 0.01,
                 step="Courbe Pareto budget → bénéfice (6 niveaux)…",
             )
+            # 6 niveaux centrés autour du budget calculé (×0.2, ×0.5, ×1, ×2, ×4, ×8)
+            b = budget_eur
+            pareto_budgets = tuple(b * f for f in (0.2, 0.5, 1.0, 2.0, 4.0, 8.0))
             par = compute_pareto_frontier(
                 net, od, main_profile or PROFILE_BY_NAME[profile_names[0]], ue,
-                budgets_eur=(5e6, 15e6, 30e6, 60e6, 120e6, 250e6),
+                budgets_eur=pareto_budgets,
                 max_proposals=ap["max_candidates"],
                 max_fw_evals=ap["max_fw_evals"],
                 fw_max_iter=ap["fw_max_iter"], fw_tol=ap["fw_tol"],
-                fw_max_iter_cand=ap["fw_max_iter_cand"], fw_tol_cand=ap["fw_tol_cand"],
-                screen_factor=ap["screen_factor"],
                 obstacle_index=obstacles,
                 soft_index=bridges,
                 periphery_margin_m=float(req_dict["periphery_margin_m"]),
@@ -656,6 +648,9 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             status="done",
             result={
                 "city": city,
+                "horizon_years": horizon_years,
+                "budget": budget_payload,
+                "projection": projection_payload,
                 "profiles": results,
                 "baseline": main_baseline_payload,
                 "joint": main_joint_payload,

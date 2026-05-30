@@ -60,7 +60,7 @@
 <section class="launch" id="launch">
   <div class="launch-card">
     <h2>Lancez une simulation</h2>
-    <p class="h-sub">Choisissez une ville, ajustez le budget, sélectionnez un profil de décideur.</p>
+    <p class="h-sub">Choisissez une ville, son horizon de planification, et un profil de décideur. Le budget est calculé automatiquement à partir des comptes OFGL de la commune.</p>
 
     <h3 style="font-family: var(--font-display); font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 24px 0 12px;">1. Ville</h3>
     <div class="cities-grid" id="cities-grid"></div>
@@ -71,8 +71,8 @@
     <h3 style="font-family: var(--font-display); font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 24px 0 12px;">3. Paramètres</h3>
     <div class="params">
       <div class="param">
-        <label for="p-budget">Budget construction <span class="value" id="v-budget">50 M€</span></label>
-        <input type="range" id="p-budget" title="Budget construction (M€)" min="5" max="500" step="5" value="50">
+        <label for="p-horizon">Horizon de planification <span class="value" id="v-horizon">10 ans</span></label>
+        <input type="range" id="p-horizon" title="Horizon (5 ou 10 ans). La demande est projetée via ML et le budget est calculé depuis les comptes OFGL de la commune." min="5" max="10" step="5" value="10">
       </div>
       <div class="param">
         <label for="p-hour">Heure de pointe <span class="value" id="v-hour">8 h</span></label>
@@ -144,7 +144,7 @@
       <div class="toggle"></div>
       <div>
         <div class="toggle-label">Courbe Pareto budget → bénéfice</div>
-        <div class="toggle-help">Évalue 6 niveaux de budget (5 / 15 / 30 / 60 / 120 / 250 M€) et identifie le sweet spot des rendements décroissants. +6 FW.</div>
+        <div class="toggle-help">Évalue 6 niveaux de budget autour de la valeur calculée et identifie le sweet spot des rendements décroissants. +6 FW.</div>
       </div>
     </div>
 

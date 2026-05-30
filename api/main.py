@@ -58,13 +58,33 @@ def serve_dashboard() -> FileResponse:
 # ── API ───────────────────────────────────────────────────────────────────
 
 PRESET_CITIES = [
-    {"slug": "villeurbanne", "label": "Villeurbanne", "osm": "Villeurbanne, France", "lat": 45.7665, "lng": 4.8795, "population": 152_000, "size": "S"},
-    {"slug": "lyon", "label": "Lyon", "osm": "Lyon, France", "lat": 45.7640, "lng": 4.8357, "population": 522_000, "size": "L"},
-    {"slug": "lille", "label": "Lille", "osm": "Lille, France", "lat": 50.6292, "lng": 3.0573, "population": 235_000, "size": "M"},
-    {"slug": "bordeaux", "label": "Bordeaux", "osm": "Bordeaux, France", "lat": 44.8378, "lng": -0.5792, "population": 260_000, "size": "M"},
-    {"slug": "nantes", "label": "Nantes", "osm": "Nantes, France", "lat": 47.2184, "lng": -1.5536, "population": 322_000, "size": "M"},
-    {"slug": "rennes", "label": "Rennes", "osm": "Rennes, France", "lat": 48.1173, "lng": -1.6778, "population": 220_000, "size": "M"},
+    # IDF — éligible forecast (modèle entraîné sur dépts 75/92/93/94) + budget OFGL
+    {"slug": "boulogne", "label": "Boulogne-Billancourt", "osm": "Boulogne-Billancourt, France",
+     "lat": 48.8356, "lng": 2.2417, "population": 121_000, "size": "M", "insee": "92012"},
+    {"slug": "saint-denis", "label": "Saint-Denis", "osm": "Saint-Denis, Seine-Saint-Denis, France",
+     "lat": 48.9362, "lng": 2.3574, "population": 113_000, "size": "M", "insee": "93066"},
+    {"slug": "vincennes", "label": "Vincennes", "osm": "Vincennes, France",
+     "lat": 48.8478, "lng": 2.4382, "population": 49_000, "size": "S", "insee": "94081"},
+    {"slug": "paris", "label": "Paris (centre)", "osm": "Paris, France",
+     "lat": 48.8566, "lng": 2.3522, "population": 2_140_000, "size": "L", "insee": "75056"},
+    # Hors IDF — forecast indisponible, budget via heuristique pop × per_capita
+    {"slug": "villeurbanne", "label": "Villeurbanne", "osm": "Villeurbanne, France",
+     "lat": 45.7665, "lng": 4.8795, "population": 152_000, "size": "S", "insee": "69266"},
+    {"slug": "lyon", "label": "Lyon", "osm": "Lyon, France",
+     "lat": 45.7640, "lng": 4.8357, "population": 522_000, "size": "L", "insee": "69123"},
+    {"slug": "lille", "label": "Lille", "osm": "Lille, France",
+     "lat": 50.6292, "lng": 3.0573, "population": 235_000, "size": "M", "insee": "59350"},
+    {"slug": "bordeaux", "label": "Bordeaux", "osm": "Bordeaux, France",
+     "lat": 44.8378, "lng": -0.5792, "population": 260_000, "size": "M", "insee": "33063"},
+    {"slug": "nantes", "label": "Nantes", "osm": "Nantes, France",
+     "lat": 47.2184, "lng": -1.5536, "population": 322_000, "size": "M", "insee": "44109"},
+    {"slug": "rennes", "label": "Rennes", "osm": "Rennes, France",
+     "lat": 48.1173, "lng": -1.6778, "population": 220_000, "size": "M", "insee": "35238"},
 ]
+
+# Communes IDF pour lesquelles forecast + OFGL sont disponibles
+IDF_DEPT_PREFIXES = ("75", "92", "93", "94")
+FORECAST_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "forecast" / "idf"
 
 
 @app.get("/api/cities")

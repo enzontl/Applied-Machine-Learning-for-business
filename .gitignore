@@ -12,10 +12,15 @@ eggs/
 *.egg
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .tox/
+.nox/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.python_history
 
 # --- Environnements virtuels ---
 .venv/
@@ -32,7 +37,10 @@ ENV/
 .idea/
 *.swp
 *.swo
+*.tmp
+*.bak
 .DS_Store
+Thumbs.db
 
 # --- Données volumineuses ---
 data/raw/*
@@ -55,6 +63,7 @@ ROUTE500_*/
 # --- Caches OSMnx ---
 cache/
 .osmnx_cache/
+.cache/
 
 # --- Logs ---
 *.log
@@ -68,6 +77,10 @@ configs/secrets.yaml
 # --- Outputs ---
 outputs/
 results/
+
+# --- Frontend / Node ---
+node_modules/
+frontend/node_modules/
 
 !notebooks/*.html
 !frontend/*.html

@@ -39,26 +39,16 @@
     </div>
   </div>
 
-  <!-- Score actuel (baseline détaillé) -->
-  <section class="dash-section dash-section-tight">
-    <h3 class="dash-section-mini">Score actuel de la ville (avant plan)</h3>
-    <div class="kpis kpis-baseline" id="kpis-baseline"></div>
+  <!-- Synthèse -->
+  <section class="dash-section dash-section-tight hidden" id="forecast-block">
+    <h3 class="dash-section-mini">Synthèse</h3>
+    <div class="kpis" id="kpis-forecast"></div>
   </section>
 
-  <!-- KPI cards principaux (après plan) -->
+  <!-- KPI cards principaux -->
   <section class="dash-section dash-section-tight">
     <h3 class="dash-section-mini">Effet du plan</h3>
     <div class="kpis" id="kpis"></div>
-  </section>
-
-  <!-- Bloc re-évaluation jointe -->
-  <section class="dash-section dash-section-tight hidden" id="joint-block">
-    <h3 class="dash-section-mini">Re-évaluation jointe du plan</h3>
-    <div class="kpis kpis-joint" id="kpis-joint"></div>
-    <div id="joint-warning" class="alert alert-warning hidden">
-      ⚠ Redondance élevée : plusieurs interventions se cannibalisent. Envisager d'en retirer pour libérer du budget.
-    </div>
-    <div id="equity-verdict" class="alert hidden"></div>
   </section>
 
   <div class="dash-main">

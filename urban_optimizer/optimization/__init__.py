@@ -21,7 +21,7 @@ from .network_design import (
     propose_urban_plan,
 )
 from .pareto import ParetoFrontier, ParetoPoint, compute_pareto_frontier
-from .ranking import CandidateEvaluation, rank_candidates, select_under_budget
+from .ranking import CandidateEvaluation, rank_candidates
 from .robustness import RobustnessPoint, RobustnessReport, evaluate_plan_robustness
 from .score import CityScore, score_network
 
@@ -31,7 +31,6 @@ __all__ = [
     "generate_candidates",
     "CandidateEvaluation",
     "rank_candidates",
-    "select_under_budget",
     # Design réseau (brique 5b — corridors à élargir)
     "NewArcProposal",
     "NewArcEvaluation",
