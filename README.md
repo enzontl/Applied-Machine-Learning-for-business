@@ -21,6 +21,8 @@ dashboard web.
 
 ## Installation
 
+Si `uv` est installé, c'est la voie la plus simple :
+
 ```bash
 uv sync
 ```
@@ -29,6 +31,27 @@ Optionnel pour le zonage H3 :
 
 ```bash
 uv sync --extra h3
+```
+
+Sans `uv`, tu peux utiliser l'outillage Python standard :
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+Pour les dépendances de développement :
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Et pour le support H3 :
+
+```bash
+python -m pip install -e ".[h3]"
 ```
 
 ## Données externes

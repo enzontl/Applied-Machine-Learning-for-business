@@ -16,7 +16,7 @@ import numpy as np
 
 from urban_optimizer.assignment import solve_user_equilibrium
 from urban_optimizer.config import CRS_WGS84
-from urban_optimizer.demand import generate_od_matrix
+from urban_optimizer.demand import build_zoning, gravity_od
 from urban_optimizer.diagnosis import compute_accessibility
 from urban_optimizer.network import build_network, load_bridge_triggers, load_obstacles, purge_old_caches
 
@@ -159,6 +159,56 @@ def _joint_payload(joint) -> dict | None:
         "joint_vht_h": float(joint.joint_vht_h),
         "baseline_vht_h": float(joint.baseline_vht_h),
     }
+
+
+def _accessibility_heatmap_payload(zoning, baseline_access, joint) -> dict | None:
+    """Sérialise l'impact spatial par zone en GeoJSON."""
+    if zoning is None or baseline_access is None or joint is None:
+        return None
+
+    zone_gdf = zoning.gdf.to_crs(CRS_WGS84).copy()
+    before = np.asarray(baseline_access.per_zone_reachable, dtype=float)
+    after = np.asarray(getattr(joint, "per_zone_reachable_after", np.zeros(0)), dtype=float)
+    if len(before) == 0 or len(after) == 0 or len(zone_gdf) == 0:
+        return None
+    if len(before) != len(zone_gdf) or len(after) != len(zone_gdf):
+        return None
+
+    zone_gdf["access_before"] = before
+    zone_gdf["access_after"] = after
+    zone_gdf["access_delta"] = zone_gdf["access_after"] - zone_gdf["access_before"]
+    zone_gdf["access_delta_pct"] = np.where(
+        zone_gdf["access_before"] > 0,
+        zone_gdf["access_delta"] / zone_gdf["access_before"] * 100.0,
+        np.nan,
+    )
+    zone_gdf["centroid"] = zone_gdf.geometry.centroid
+
+    features = []
+    for _, row in zone_gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        feature = {
+            "type": "Feature",
+            "geometry": geom.__geo_interface__,
+            "properties": {
+                "zone_id": str(row["zone_id"]),
+                "population": float(row["population"]) if "population" in row else None,
+                "jobs": float(row["jobs"]) if "jobs" in row else None,
+                "access_before": float(row["access_before"]),
+                "access_after": float(row["access_after"]),
+                "access_delta": float(row["access_delta"]),
+                "access_delta_pct": float(row["access_delta_pct"]) if np.isfinite(row["access_delta_pct"]) else None,
+                "centroid": [
+                    float(row["centroid"].x),
+                    float(row["centroid"].y),
+                ],
+            },
+        }
+        features.append(feature)
+
+    return {"type": "FeatureCollection", "features": features}
 
 
 def _kpis_for_profile(
@@ -435,16 +485,25 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
         _fut_bridges   = _obs_pool.submit(load_bridge_triggers, city)
         _t_obs_start   = _time.perf_counter()
 
-        job.update(progress=0.10, step="Génération de la demande OD…")
-        _t = _step_timer("generate_od")
-        od = generate_od_matrix(
+        job.update(progress=0.10, step="Zonage et génération de la demande OD…")
+        _t = _step_timer("build_zoning")
+        zoning = build_zoning(
             net,
-            hour=req_dict["hour"],
             method="grid",
             n_cells=req_dict["n_cells"],
+            h3_resolution=8,
+            insee_codes_dept=None,
+        )
+        logger.info(f"⏱ build_zoning : {_time.perf_counter() - _t:.1f}s")
+
+        _t = _step_timer("gravity_od")
+        od = gravity_od(
+            zoning,
+            hour=req_dict["hour"],
+            scenario="weekday",
             scale_factor=req_dict["scale_factor"],
         )
-        logger.info(f"⏱ generate_od : {_time.perf_counter() - _t:.1f}s")
+        logger.info(f"⏱ gravity_od : {_time.perf_counter() - _t:.1f}s")
 
         # ── Projection ML à l'horizon (si éligible) ──────────────────────
         insee_code, city_pop = _lookup_insee_population(city)
@@ -506,6 +565,7 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
         results: list[dict] = []
         network_geojson = None
         plan_geojson = None
+        accessibility_geojson = None
         main_plan = None       # liste des NewArcEvaluation du profil principal (pour robustesse)
         main_profile = None    # MayorProfile principal
         main_baseline_payload = None
@@ -576,6 +636,7 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
             if idx == 0:
                 network_geojson = _network_geojson(net, sat_before, sat_after)
                 plan_geojson = _plan_geojson(plan, net)
+                accessibility_geojson = _accessibility_heatmap_payload(zoning, baseline_access, joint)
                 main_plan = plan
                 main_profile = profile
                 main_baseline_payload = _baseline_payload(baseline_score, baseline_access, ue, net, od)
@@ -656,6 +717,7 @@ def run_pipeline(job: JobState, req_dict: dict[str, Any]) -> None:
                 "joint": main_joint_payload,
                 "network_geojson": network_geojson,
                 "plan_geojson": plan_geojson,
+                "accessibility_geojson": accessibility_geojson,
                 "robustness": robustness_payload,
                 "pareto": pareto_payload,
                 "braess": braess_payload,

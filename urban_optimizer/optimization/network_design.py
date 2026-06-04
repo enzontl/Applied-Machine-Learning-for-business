@@ -71,6 +71,30 @@ def _widening_cost_per_m(highway: str) -> float:
     return 1_200.0
 
 
+def _proposal_signature(prop: "NewArcProposal") -> tuple:
+    """Clé canonique pour identifier une intervention physique unique."""
+    if prop.edge_ids:
+        return ("edge_ids", tuple(sorted(int(eid) for eid in prop.edge_ids)))
+
+    coords = prop.corridor_xy if len(prop.corridor_xy) >= 2 else [prop.u_xy, prop.v_xy]
+    rounded = tuple((round(float(x), 3), round(float(y), 3)) for x, y in coords)
+    reverse = tuple(reversed(rounded))
+    return ("geometry", min(rounded, reverse))
+
+
+def _dedupe_proposals(proposals: list[NewArcProposal]) -> list[NewArcProposal]:
+    """Supprime les doublons en conservant la première occurrence."""
+    seen: set[tuple] = set()
+    unique: list[NewArcProposal] = []
+    for prop in proposals:
+        signature = _proposal_signature(prop)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(prop)
+    return unique
+
+
 # ── Dataclasses ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -154,6 +178,9 @@ class JointPlanResult:
     # Accessibilité avant / après (# moyen de zones joignables sous le seuil)
     accessibility_before: float = 0.0
     accessibility_after: float = 0.0
+    per_zone_reachable_after: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
     # Coefficient de Gini avant / après (0 = parfaite équité)
     gini_before: float = 0.0
     gini_after: float = 0.0
@@ -1317,11 +1344,17 @@ def _generate_proposals(
             picked += list(secondary[: n - len(picked)])
         return picked
 
-    return (
+    combined = (
         _fill(corridors,   upgrades,    n_corr)
         + _fill(upgrades,  corridors,   n_upgr)
         + _fill(new_routes, corridors,  n_new)
     )
+    unique = _dedupe_proposals(combined)
+    if len(unique) != len(combined):
+        logger.info(
+            f"  Candidats uniques : {len(unique)} / {len(combined)} après déduplication"
+        )
+    return unique
 
 
 def _greedy_select(
@@ -1442,6 +1475,7 @@ def _joint_re_evaluate(
         existing_sat_after=sat_existing_after,
         accessibility_before=baseline_access_mean,
         accessibility_after=joint_access.mean_reachable,
+        per_zone_reachable_after=joint_access.per_zone_reachable,
         gini_before=baseline_gini,
         gini_after=joint_access.gini,
         induced_iter=induced_iter,

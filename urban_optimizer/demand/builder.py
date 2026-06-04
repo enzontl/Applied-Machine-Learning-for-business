@@ -42,7 +42,7 @@ def generate_od_matrix(
     """
     logger.info(f"=== Brique 2 : génération OD ({method}, h={hour}) ===")
 
-    zoning = _build_zoning(
+    zoning = build_zoning(
         network,
         method=method,
         n_cells=n_cells,
@@ -64,7 +64,7 @@ def generate_od_matrix(
     return od
 
 
-def _build_zoning(
+def build_zoning(
     network: UrbanNetwork,
     method: str,
     n_cells: int,

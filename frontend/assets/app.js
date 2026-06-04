@@ -29,6 +29,46 @@ function fmtEur(n) {
   return `${sign}${abs.toFixed(0)} €`;
 }
 
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function hexToRgb(hex) {
+  const clean = hex.replace("#", "");
+  const full = clean.length === 3
+    ? clean.split("").map(ch => ch + ch).join("")
+    : clean;
+  const value = parseInt(full, 16);
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+}
+
+function rgbToHex({ r, g, b }) {
+  const toHex = (v) => Math.round(v).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function mixHex(a, b, t) {
+  const from = hexToRgb(a);
+  const to = hexToRgb(b);
+  return rgbToHex({
+    r: from.r + (to.r - from.r) * t,
+    g: from.g + (to.g - from.g) * t,
+    b: from.b + (to.b - from.b) * t,
+  });
+}
+
+function accessibilityColor(value, maxAbs) {
+  const bound = Math.max(Math.abs(maxAbs || 0), 1);
+  const t = clamp01(Math.abs(value) / bound);
+  if (value > 0) return mixHex("#F8FAFC", "#2563EB", t);
+  if (value < 0) return mixHex("#F8FAFC", "#DC2626", t);
+  return "#F8FAFC";
+}
+
 /* ════════════════════════════════════════════════════════════════════════
    LANDING PAGE
    ════════════════════════════════════════════════════════════════════════ */
@@ -337,10 +377,13 @@ function renderDashboard(data) {
   renderKpis(main.kpis);
 
   // Carte (avec Braess geojson optionnel)
-  initMap(data.network_geojson, data.plan_geojson, data.braess_geojson);
+  initMap(data.network_geojson, data.plan_geojson, data.braess_geojson, data.accessibility_geojson);
 
   // Liste interventions
   renderInterventions(main.interventions);
+
+  // Impact spatial par zone
+  renderAccessibilityImpact(data.accessibility_geojson);
 
   // Mode comparaison ?
   if (profiles.length > 1) {
@@ -493,6 +536,7 @@ function renderRobustness(rob) {
 /* ─── Pareto ─────────────────────────────────────────────────────────── */
 
 let PARETO_CHART = null;
+let IMPACT_CHART = null;
 
 function renderPareto(par) {
   const body = document.getElementById("pareto-body");
@@ -581,6 +625,159 @@ function renderPareto(par) {
   });
 }
 
+function median(values) {
+  if (!values || values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function renderAccessibilityImpact(accessGeo) {
+  const block = document.getElementById("impact-block");
+  const summary = document.getElementById("impact-summary");
+  const body = document.getElementById("impact-body");
+  const canvas = document.getElementById("impact-chart");
+  if (!block || !summary || !body || !canvas) return;
+
+  if (!accessGeo || !accessGeo.features || !accessGeo.features.length) {
+    block.classList.add("hidden");
+    return;
+  }
+
+  const rows = accessGeo.features.map(f => ({
+    zone_id: String(f.properties?.zone_id ?? "zone"),
+    before: Number(f.properties?.access_before ?? 0),
+    after: Number(f.properties?.access_after ?? 0),
+    delta: Number(f.properties?.access_delta ?? 0),
+    pct: f.properties?.access_delta_pct,
+    population: Number(f.properties?.population ?? 0),
+    jobs: Number(f.properties?.jobs ?? 0),
+  })).filter(r => Number.isFinite(r.before) && Number.isFinite(r.after) && Number.isFinite(r.delta));
+
+  if (!rows.length) {
+    block.classList.add("hidden");
+    return;
+  }
+
+  const gains = rows.filter(r => r.delta > 0);
+  const losses = rows.filter(r => r.delta < 0);
+  const avgDelta = rows.reduce((sum, r) => sum + r.delta, 0) / rows.length;
+  const medDelta = median(rows.map(r => r.delta));
+  const best = rows.reduce((acc, r) => (r.delta > acc.delta ? r : acc), rows[0]);
+  const worst = rows.reduce((acc, r) => (r.delta < acc.delta ? r : acc), rows[0]);
+
+  summary.innerHTML = [
+    {
+      label: "Zones en hausse",
+      value: `${gains.length}/${rows.length}`,
+      accent: "good",
+    },
+    {
+      label: "Δ moyen",
+      value: `${avgDelta >= 0 ? "+" : ""}${avgDelta.toFixed(1)} zones`,
+      accent: avgDelta >= 0 ? "good" : "bad",
+    },
+    {
+      label: "Δ médian",
+      value: `${medDelta >= 0 ? "+" : ""}${medDelta.toFixed(1)} zones`,
+      accent: medDelta >= 0 ? "good" : "bad",
+    },
+    {
+      label: "Meilleur gain",
+      value: `${best.zone_id} · +${best.delta.toFixed(1)}`,
+      accent: "good",
+    },
+    {
+      label: "Pire perte",
+      value: `${worst.zone_id} · ${worst.delta >= 0 ? "+" : ""}${worst.delta.toFixed(1)}`,
+      accent: worst.delta >= 0 ? "good" : "bad",
+    },
+  ].map(stat => `
+    <div class="impact-stat ${stat.accent || "neutral"}">
+      <div class="label">${stat.label}</div>
+      <div class="value">${stat.value}</div>
+    </div>
+  `).join("");
+
+  const ranked = [...rows].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 12);
+  body.innerHTML = "";
+  ranked.forEach(r => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong>${r.zone_id}</strong></td>
+      <td class="num">${fmtNumber(r.before, { maximumFractionDigits: 1 })}</td>
+      <td class="num">${fmtNumber(r.after, { maximumFractionDigits: 1 })}</td>
+      <td class="num">${r.delta >= 0 ? "+" : ""}${fmtNumber(r.delta, { maximumFractionDigits: 1 })}</td>
+    `;
+    body.appendChild(tr);
+  });
+
+  block.classList.remove("hidden");
+
+  const chartRows = [...rows].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 15);
+  const labels = chartRows.map(r => r.zone_id);
+  const values = chartRows.map(r => r.delta);
+  const colors = chartRows.map(r => (r.delta >= 0 ? "rgba(37, 99, 235, 0.72)" : "rgba(220, 38, 38, 0.72)"));
+  const maxAbs = Math.max(1, ...values.map(v => Math.abs(v)));
+
+  try {
+    if (IMPACT_CHART) IMPACT_CHART.destroy();
+    IMPACT_CHART = new Chart(canvas, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          label: "Δ accessibilité (zones)",
+          data: values,
+          backgroundColor: colors,
+          borderColor: colors,
+          borderWidth: 1,
+          borderRadius: 8,
+          maxBarThickness: 20,
+        }],
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: "#0E1116",
+            padding: 12,
+            titleFont: { family: "Inter", weight: "600" },
+            bodyFont: { family: "JetBrains Mono", size: 12 },
+            callbacks: {
+              title: (items) => items[0].label,
+              label: (ctx) => {
+                const value = Number(ctx.raw ?? 0);
+                return `Δ : ${value >= 0 ? "+" : ""}${value.toFixed(1)} zones`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            min: -maxAbs * 1.1,
+            max: maxAbs * 1.1,
+            grid: { color: "#F0F0EC" },
+            ticks: { font: { family: "JetBrains Mono", size: 11 }, color: "#6B7280" },
+            title: { display: true, text: "Δ accessibilité (zones joignables)", font: { family: "Inter", weight: "600", size: 12 } },
+          },
+          y: {
+            grid: { display: false },
+            ticks: { font: { family: "JetBrains Mono", size: 11 }, color: "#6B7280" },
+          },
+        },
+      },
+    });
+  } catch (err) {
+    console.warn("[uo] impact chart failed:", err);
+    canvas.insertAdjacentHTML("afterend", "<p class=\"muted\" style=\"padding: 12px 0 0 16px;\">Le graphique n’a pas pu être dessiné, mais le tableau des zones reste disponible.</p>");
+  }
+}
+
 function renderKpis(kpis) {
   const container = document.getElementById("kpis");
   container.innerHTML = "";
@@ -655,7 +852,11 @@ let LAYER_BEFORE = null;
 let LAYER_AFTER = null;
 let LAYER_PLAN = null;
 let LAYER_BRAESS = null;
+let LAYER_ACCESS = null;
+let LAYER_HEAT_GAIN = null;
+let LAYER_HEAT_LOSS = null;
 let CURRENT_MODE = "after";
+let NETWORK_FEATURE_COUNT = 0;
 
 function satStyle(s) {
   if (s < 0.5) return { color: "#9EE493", weight: 1.5, opacity: 0.55 };
@@ -670,11 +871,12 @@ const PLAN_STYLES = {
   new_route: { color: "#16A34A", weight: 6, opacity: 0.9 },
 };
 
-function initMap(networkGeo, planGeo, braessGeo) {
+function initMap(networkGeo, planGeo, braessGeo, accessibilityGeo) {
   if (!networkGeo || !networkGeo.features.length) {
     document.getElementById("map").innerHTML = "<p style='padding:20px; color:var(--muted);'>Aucun arc à afficher.</p>";
     return;
   }
+  NETWORK_FEATURE_COUNT = networkGeo.features.length;
 
   // Centre depuis bbox
   let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
@@ -752,12 +954,69 @@ function initMap(networkGeo, planGeo, braessGeo) {
     });
   }
 
+  // Heatmap d'impact spatial (vraie heatmap, centrée sur les zones)
+  LAYER_HEAT_GAIN = null;
+  LAYER_HEAT_LOSS = null;
+  if (accessibilityGeo && accessibilityGeo.features && accessibilityGeo.features.length && typeof L.heatLayer === "function") {
+    const gainPoints = [];
+    const lossPoints = [];
+    const deltas = accessibilityGeo.features
+      .map(f => Number(f.properties?.access_delta ?? 0))
+      .filter(v => Number.isFinite(v));
+    const maxAbs = Math.max(1, ...deltas.map(v => Math.abs(v)));
+
+    accessibilityGeo.features.forEach(f => {
+      const p = f.properties || {};
+      const centroid = Array.isArray(p.centroid) && p.centroid.length >= 2 ? p.centroid : null;
+      if (!centroid) return;
+      const lng = Number(centroid[0]);
+      const lat = Number(centroid[1]);
+      const delta = Number(p.access_delta ?? 0);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(delta) || delta === 0) return;
+      const intensity = Math.max(0.15, Math.min(1.0, Math.abs(delta) / maxAbs));
+      const point = [lat, lng, intensity];
+      if (delta > 0) gainPoints.push(point);
+      else lossPoints.push(point);
+    });
+
+    if (gainPoints.length) {
+      LAYER_HEAT_GAIN = L.heatLayer(gainPoints, {
+        radius: 42,
+        blur: 28,
+        maxZoom: 17,
+        minOpacity: 0.30,
+        gradient: {
+          0.2: "#DBEAFE",
+          0.45: "#60A5FA",
+          0.7: "#2563EB",
+          1.0: "#0F172A",
+        },
+      });
+    }
+    if (lossPoints.length) {
+      LAYER_HEAT_LOSS = L.heatLayer(lossPoints, {
+        radius: 42,
+        blur: 28,
+        maxZoom: 17,
+        minOpacity: 0.30,
+        gradient: {
+          0.2: "#FEE2E2",
+          0.45: "#F87171",
+          0.7: "#DC2626",
+          1.0: "#7F1D1D",
+        },
+      });
+    }
+  } else if (accessibilityGeo && accessibilityGeo.features && accessibilityGeo.features.length) {
+    console.warn("[uo] leaflet.heat non disponible, impact spatial en fallback simple.");
+  }
+
   // Mode initial : "après plan"
   LAYER_AFTER.addTo(MAP);
   LAYER_PLAN.addTo(MAP);
   LAYER_BRAESS.addTo(MAP);
 
-  document.getElementById("map-info").textContent = `${networkGeo.features.length} arcs affichés`;
+  document.getElementById("map-info").textContent = `${NETWORK_FEATURE_COUNT} arcs affichés`;
 }
 
 function bindMapToggle() {
@@ -779,12 +1038,18 @@ function switchMapMode(mode) {
   MAP.removeLayer(LAYER_AFTER);
   if (LAYER_PLAN) MAP.removeLayer(LAYER_PLAN);
   if (LAYER_BRAESS) MAP.removeLayer(LAYER_BRAESS);
+  if (LAYER_HEAT_GAIN) MAP.removeLayer(LAYER_HEAT_GAIN);
+  if (LAYER_HEAT_LOSS) MAP.removeLayer(LAYER_HEAT_LOSS);
   if (mode === "before") {
     LAYER_BEFORE.addTo(MAP);
   } else if (mode === "after") {
     LAYER_AFTER.addTo(MAP);
     if (LAYER_PLAN) LAYER_PLAN.addTo(MAP);
     if (LAYER_BRAESS) LAYER_BRAESS.addTo(MAP);
+  } else if (mode === "impact") {
+    if (LAYER_HEAT_LOSS) LAYER_HEAT_LOSS.addTo(MAP);
+    if (LAYER_HEAT_GAIN) LAYER_HEAT_GAIN.addTo(MAP);
+    if (LAYER_PLAN) LAYER_PLAN.addTo(MAP);
   } else {
     // split : on superpose les 2 avec opacité réduite sur le before
     LAYER_BEFORE.addTo(MAP);
@@ -793,4 +1058,13 @@ function switchMapMode(mode) {
     if (LAYER_BRAESS) LAYER_BRAESS.addTo(MAP);
   }
   CURRENT_MODE = mode;
+
+  const info = document.getElementById("map-info");
+  if (info) {
+    if (mode === "impact") {
+      info.textContent = "Heatmap : bleu = gain d'accès, rouge = perte";
+    } else {
+      info.textContent = `${NETWORK_FEATURE_COUNT} arcs affichés`;
+    }
+  }
 }

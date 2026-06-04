@@ -35,6 +35,7 @@
     <div class="tab-switch" id="map-toggle">
       <button type="button" data-mode="before">Avant</button>
       <button type="button" data-mode="after" class="active">Après plan</button>
+      <button type="button" data-mode="impact">Impact spatial</button>
       <button type="button" data-mode="split">Avant / Après</button>
     </div>
   </div>
@@ -73,6 +74,11 @@
           <span class="row-flex"><span class="swatch thick swatch-newroute"></span>nouvelle route</span>
           <span class="row-flex"><span class="swatch thick dashed"></span>à supprimer (Braess)</span>
         </div>
+        <div class="group">
+          <strong class="legend-label">Impact :</strong>
+          <span class="row-flex"><span class="swatch swatch-impact-pos"></span>gain</span>
+          <span class="row-flex"><span class="swatch swatch-impact-neg"></span>perte</span>
+        </div>
       </div>
     </div>
 
@@ -83,6 +89,34 @@
       </div>
     </aside>
   </div>
+
+  <section id="impact-block" class="dash-section hidden">
+    <h2 class="dash-section-title">Carte de chaleur de l'impact spatial</h2>
+    <p class="dash-section-sub">
+      La carte du dessus montre les zones qui gagnent ou perdent de l'accessibilité après le plan.
+      Le rouge signale une perte, le bleu un gain.
+    </p>
+    <div class="impact-grid">
+      <div class="panel">
+        <h3 class="panel-title">Avant vs après</h3>
+        <div class="chart-wrap chart-wrap-large"><canvas id="impact-chart"></canvas></div>
+      </div>
+      <div class="panel panel-flush">
+        <div class="impact-summary" id="impact-summary"></div>
+        <table class="compare-table" id="impact-table">
+          <thead>
+            <tr>
+              <th>Zone</th>
+              <th>Avant</th>
+              <th>Après</th>
+              <th>Δ</th>
+            </tr>
+          </thead>
+          <tbody id="impact-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 
   <!-- Bloc comparaison multi-profil (affiché seulement en mode multi) -->
   <section id="compare-block" class="dash-section hidden">
@@ -219,6 +253,7 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" crossorigin=""></script>
 <script src="/assets/app.js"></script>
 <script>
   window.addEventListener("DOMContentLoaded", () => {
